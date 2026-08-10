@@ -1,0 +1,9 @@
+"Indicador","Validacion","Test_final"
+"Umbral",0.4874,0.4874
+"Precision",0.3411,0.3462
+"Recall",0.6684,0.6214
+"F1",0.4517,0.4446
+"PR-AUC",0.4527,0.4471
+"Log-loss",0.5135,0.5097
+"Costo total",10947,2843
+"Número de acciones",7273,1664
