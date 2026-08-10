@@ -24,13 +24,13 @@ Este documento detalla las tareas principales, productos elaborados y revisiones
 •⁠  ⁠⁠ DATASET_README.md ⁠, ⁠ README.md ⁠, ⁠ CONTRIBUTIONS.md ⁠.
 •⁠  ⁠⁠ informe.Rmd ⁠ consolidado (Secciones 1, 2, 4.3, 5 y 13).
 
-Revisión cruzada realizada:
-•⁠  ⁠Valentina Quiroz: apoyo en el código de KNN.
-•⁠  ⁠Martina Bedwell: apoyo en la partición 80/20, planteando el
-  argumento del drift de prevalencia como justificación.
-•⁠  ⁠Izaak Ulloa: revisión del código de Random Forest.
-•⁠  ⁠Sebastián Quintolén: apoyo en clasificación y selección de umbral,
-  buscando el contenido del curso aplicable.
+**Revisión cruzada realizada:**
+•⁠ Valentina Quiroz: apoyo en el código de KNN.
+•⁠ Martina Bedwell: apoyo en la partición 80/20, planteando el argumento del drift de prevalencia como justificación.
+•⁠ Izaak Ulloa: revisión del código de Random Forest.
+•⁠ Sebastián Quintolen: apoyo en clasificación y selección del umbral, buscando el contenido del curso aplicable.
+
+
 ---
 
 ## Martina Bedwell
@@ -62,17 +62,17 @@ Revisión cruzada realizada:
 **Rol:** Modelos geométricos y locales
 
 **Tareas principales:**
-- [PENDIENTE — ej: "KNN, SVM lineal y SVM con kernel RBF (Sección 7.2-7.3)"] ayuda knn
-- [PENDIENTE — ej: "Ajuste de grillas de hiperparámetros (k, C, sigma) y paralelización"] los 3(izaac seba )
+•⁠  ⁠Realización del kNN, SVM lineal y SVM con kernel RBF (Sección 7.2 - 7.3)
+•⁠  ⁠Ajuste de grillas de hiperparámetros, tales como k, C y sigma.
 
 **Productos elaborados:**
-- [PENDIENTE — ej: chunks "knn-cv", "svm", "svm-ker" en informe.Rmd] verificacion chunk
+•⁠  ⁠chunks “knn-cv”, “svm”, “svm-ker” y sus correspondientes partes en el informe.
 
 **Revisión cruzada realizada:**
-- Revisé el código de: [PENDIENTE]
-- Comentarios/correcciones aportadas: [PENDIENTE]
-
----
+•⁠  ⁠Izaak Ulloa: Revisión del código de arbol de clasificación
+•⁠  ⁠Sebastian Quintolen: Apoyo en la comparación formal de la calibracion
+•⁠  ⁠Martina Bedwell: Apoyo en la creación de los chunks “baseline”, “logit-cv”, “partición”.
+•⁠  ⁠Alex Astudillo: Apoyo en la consolidación final del informe y en la coordinación de migración del codigo.
 
 
 ## Izaak Ulloa
@@ -121,8 +121,9 @@ Revisión cruzada realizada:
 •⁠  ⁠Revisé el código de: Valentina Quiroz
 •⁠  ⁠Comentarios/correcciones aportadas: Ajuste de grillas de hiperparámetros (k, C, sigma) y paralelización
 
-•⁠  ⁠Revisé el código de: Izaak Ulloa
-•⁠  ⁠Comentarios/correcciones aportadas: Árbol de clasificación, Random Forest y Gradient Boosting
+•⁠ Revisé el código de: Izaak Ulloa
+•⁠ Comentarios/correcciones aportadas: Árbol de clasificación, Random Forest y Gradient Boosting
+
 ---
 
 ## Declaración firmada
