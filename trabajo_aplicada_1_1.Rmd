@@ -1,0 +1,1584 @@
+---
+title: "Proyecto Integrador: Clasificación Supervisada"
+author: "Alex, Martina, Valentina, Sebastián e Izaak"
+date: "`r Sys.Date()`"
+lang: es-CL
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5,
+  fig.align = "center",
+  out.width = "90%",
+  comment = "#>"
+)
+
+options(digits = 4)
+```
+
+# Objetivo del proyecto
+
+El objetivo de este proyecto es predecir si un cliente de un banco aceptará
+o no un depósito a plazo (variable `y`, con clases `"no"` y `"yes"`, siendo
+`"yes"` la clase positiva), usando el dataset `bank-additional-full.csv`.
+
+Se elimina la variable `duration` (duración de la llamada telefónica) por
+tratarse de una variable con **Data Leakage**: no se conoce antes de
+realizar la llamada, que es el momento en que efectivamente se debe decidir
+a quién contactar.
+
+# Instalación y carga de librerías
+
+```{r librerias}
+# Paquetes que necesitamos para todo el proyecto (limpieza, partición,
+# validación cruzada, modelos y métricas):
+paquetes <- c(
+  "tidyverse",   # manipulación de datos y gráficos
+  "caret",       # partición, validación cruzada y modelos
+  "janitor",     # limpieza de nombres y tablas
+  "e1071",       # SVM y otras funciones
+  "kernlab",     # SVM con kernel (usado por caret)
+  "rpart",       # árboles de clasificación
+  "rpart.plot",  # visualización de árboles
+  "pROC",        # curva ROC y AUC
+  "scales",      # formato de porcentajes
+  "knitr",       # tablas en Markdown
+  "ROSE",        # sampling alternativo y utilidades de balanceo
+  "PRROC",       # curva Precision-Recall (PR-AUC)
+  "MLmetrics",   # métricas adicionales, como LogLoss
+  "broom"        # para extraer coeficientes de forma ordenada
+)
+
+# Instalamos solo los que falten (se ejecuta una sola vez por máquina)
+nuevos <- paquetes[!(paquetes %in% installed.packages()[, "Package"])]
+if (length(nuevos) > 0) {
+  install.packages(nuevos)
+}
+
+# Cargamos todas las librerías. invisible() evita que se imprima en pantalla
+# la lista de TRUE/FALSE que devuelve lapply() al cargar cada una.
+invisible(lapply(paquetes, library, character.only = TRUE))
+```
+
+# Carga y limpieza de datos
+
+```{r carga}
+# Nombre del archivo que debe estar en la MISMA carpeta que este .Rmd.
+# Al hacer Knit, R Markdown usa como carpeta de trabajo la carpeta donde
+# está guardado el .Rmd (no la carpeta donde tengas la consola abierta),
+# por eso es clave que el CSV esté justo ahí.
+ruta <- "bank-additional-full.csv"
+
+# file.exists() revisa si existe un archivo con ese nombre en la carpeta
+# de trabajo actual, y devuelve TRUE o FALSE (no lo abre, solo verifica).
+# Si no existe, stop() detiene la ejecución inmediatamente y muestra un
+# mensaje claro, en vez de dejar que read.csv2() falle más abajo con un
+# error genérico de "no se puede abrir la conexión".
+if (!file.exists(ruta)) {
+  stop(
+    "No se encontró ", ruta, ". ",
+    "Debe estar en la misma carpeta que este archivo .Rmd."
+  )
+}
+
+# read.csv2() se usa porque el archivo viene separado por punto y coma (";"),
+# como es típico en datasets europeos (este dataset es de un banco portugués).
+datos <- read.csv2(ruta, header = TRUE)
+
+head(datos)
+str(datos)
+```
+
+```{r calidad}
+# Valores faltantes:
+colSums(is.na(datos))    # No hay valores NA en este dataset
+
+# Valores "unknown" por columna:
+sapply(datos, function(x) sum(x == "unknown"))
+# Se concentran en "default", "education", "housing" y "loan". Se dejan como
+# una categoría más, ya que "unknown" puede ser información relevante en sí
+# misma (ej: un cliente que no declara si tiene crédito).
+
+# Duplicados:
+sum(duplicated(datos))
+datos <- datos[!duplicated(datos), ]
+sum(duplicated(datos))   # Verificamos que ya no queden
+
+# Rangos razonables:
+range(datos$age)
+range(datos$campaign)
+range(datos$pdays)       # 999 significa "nunca antes contactado"
+
+# Consistencia y prevalencia del target:
+table(datos$y)
+prop.table(table(datos$y))   # ~88.7% "no" vs ~11.3% "yes": desbalanceado
+```
+
+```{r conversion}
+# Algunas columnas numéricas con decimales quedaron como texto (chr) al usar
+# read.csv2(). Las convertimos explícitamente a numérico:
+vars_numeric <- c("emp.var.rate", "cons.price.idx", "cons.conf.idx",
+                   "euribor3m", "nr.employed")
+
+datos[vars_numeric] <- lapply(datos[vars_numeric],
+                               function(x) as.numeric(as.character(x)))
+
+str(datos[vars_numeric])
+
+# Eliminamos "duration" por Data Leakage (ver Objetivo del proyecto):
+datos <- datos %>% select(-duration)
+
+# Convertimos "y" a factor, fijando explícitamente "no" como clase negativa
+# y "yes" como clase positiva:
+datos$y <- factor(datos$y, levels = c("no", "yes"))
+
+str(datos)
+```
+
+**Análisis del resultado.** El dataset queda sin duplicados, con las
+variables numéricas correctamente tipeadas, sin `duration`, y con `y` como
+factor de dos niveles listo para clasificación binaria.
+
+# Análisis exploratorio (EDA)
+
+```{r eda-target}
+# ggplot(datos, aes(y)) inicia el gráfico indicando el dataset y qué
+# variable va en el eje x. geom_bar() agrega una capa de barras que cuenta
+# automáticamente cuántas observaciones hay por cada valor de "y".
+ggplot(datos, aes(y)) +
+  geom_bar()
+```
+
+**Análisis del resultado.** Se confirma el desbalance visto antes: ~89%
+`"no"` vs ~11% `"yes"`.
+
+```{r eda-month}
+ggplot(datos, aes(month)) +
+  geom_bar()
+```
+
+**Análisis del resultado.** Distribución intermitente entre meses,
+posiblemente por campañas concentradas en ciertos periodos.
+
+```{r eda-age}
+# geom_histogram(bins = 30) agrupa los valores de "age" en 30 intervalos de
+# igual ancho y grafica cuántas observaciones caen en cada uno.
+ggplot(datos, aes(age)) +
+  geom_histogram(bins = 30)
+```
+
+**Análisis del resultado.** Distribución razonable de edades, sin valores
+extraños.
+
+```{r eda-prevalencia-mes}
+prop.table(table(datos$month, datos$y), 1)
+```
+
+**Análisis del resultado.** Los meses más equilibrados son diciembre,
+marzo, octubre y septiembre; el resto mantiene el desbalance general
+(~90% `"no"`).
+
+# Partición de datos (Train / Test) de forma estratificada
+
+```{r particion}
+# Partición estratificada: mantiene la proporción de clases en train y test.
+# Es importante porque el target está desbalanceado (~89%/11%). Con una
+# partición aleatoria simple, el test podría quedar con muy pocos "yes".
+set.seed(123)
+
+indices_train <- createDataPartition(datos$y, p = 0.8, list = FALSE)
+
+train <- datos[indices_train, ]
+test  <- datos[-indices_train, ]
+
+cat("\n=== PREVALENCIA EN TRAIN ===\n")
+print(prop.table(table(train$y)))
+
+cat("\n=== PREVALENCIA EN TEST ===\n")
+print(prop.table(table(test$y)))
+```
+
+**Análisis del resultado.** Ambos conjuntos mantienen la proporción
+original (~89%/11%). A partir de aquí, `test` queda congelado hasta la
+evaluación final de cada modelo.
+
+## Justificación: partición aleatoria vs. temporal
+
+Se evaluó también una partición temporal (entrenar con los primeros
+meses de campaña, evaluar sobre los más recientes), motivada por el
+drift de prevalencia detectado en el EDA. Se comparó el AUC de un
+modelo de control (regresión logística) bajo ambos esquemas:
+
+- AUC con partición aleatoria: **0.775**
+- AUC con partición temporal: **0.714**
+
+Se optó por mantener la partición aleatoria estratificada, por tres
+razones: (1) el cronograma del proyecto no permitía reentrenar las
+ocho familias de modelos con validación *rolling-origin* sin
+comprometer la profundidad del análisis de calibración, umbral y
+subgrupos; (2) los folds rolling-origin resultantes son de tamaño muy
+desigual (el primer fold entrena con un solo mes de datos), lo que
+introduce alta varianza en la selección de hiperparámetros; y (3) el
+bloque de test temporal presenta una prevalencia de ~44.5%, muy
+distinta a la real (11.3%), sugiriendo un régimen de campaña
+particular y transitorio, no necesariamente más representativo de la
+variabilidad natural entre clientes. Se reconoce esta decisión como
+una limitación real: el desempeño reportado debe interpretarse como
+una cota optimista respecto de un despliegue prospectivo.
+
+# Exploración previa: codificación dummy y escalado (NO usado en el pipeline final)
+
+> **⚠️ Aviso importante, para quien lea/revise este código:** el bloque
+> que sigue (`x_train`, `x_test`, `preproc`, `x_train_std`, `x_test_std`)
+> fue la **primera versión** de la preparación de variables, calculada
+> **una sola vez sobre todo `train`**, antes de armar los folds de
+> validación cruzada. Se mantiene acá solo como registro del proceso
+> exploratorio, **pero ningún modelo del pipeline final lo usa** —
+> los 8 modelos entrenan con `data = train` directo, y el escalado real
+> se recalcula **dentro de cada fold** vía el argumento
+> `preProcess = c("center","scale")` de `train()` (ver la sección
+> "Modelos evaluados" más abajo). Si se calculara el escalado una sola
+> vez como en este bloque y SE USARA para entrenar, sería una fuga leve
+> de información hacia la validación — por eso se corrigió y se dejó de
+> usar, sin borrar el registro de por qué se cambió de enfoque.
+
+```{r dummy}
+# dummyVars() aprende, a partir de train, cómo convertir cada variable
+# categórica en columnas 0/1 (una por categoría, salvo la de referencia
+# gracias a fullRank = TRUE, que evita colinealidad perfecta).
+dummy_banco <- dummyVars(
+  y ~ .,
+  data = train,
+  fullRank = TRUE
+)
+# Este desajuste ocurre porque alguna categoría poco frecuente (por ejemplo,
+# "default = yes", que tiene muy pocos casos en todo el dataset) puede caer
+# completamente en train o completamente en test al particionar 80/20,
+# generando una columna dummy de más en uno de los dos conjuntos.
+# Aplicamos esa misma transformación a train y a test:
+x_train <- predict(dummy_banco, newdata = train) %>% as.data.frame()
+x_test  <- predict(dummy_banco, newdata = test)  %>% as.data.frame()
+# Asegurar que x_test tenga exactamente las mismas columnas que x_train,
+# en el mismo orden.
+
+# 1) Identificar columnas faltantes en test (respecto a train)
+cols_train <- colnames(x_train)
+cols_test  <- colnames(x_test)
+
+faltan <- setdiff(cols_train, cols_test)
+sobran <- setdiff(cols_test, cols_train)
+
+# 2) Agregar columnas faltantes con valor 0
+if (length(faltan) > 0) {
+  for (col in faltan) {
+    x_test[[col]] <- 0
+  }
+}
+
+# 3) Eliminar columnas sobrantes (si las hay)
+if (length(sobran) > 0) {
+  x_test <- x_test[, !(colnames(x_test) %in% sobran), drop = FALSE]
+}
+
+# 4) Reordenar para que coincidan exactamente con train
+x_test <- x_test[, cols_train, drop = FALSE]
+
+# Verificación rápida:
+cat("¿Coinciden los nombres? ", identical(colnames(x_train), colnames(x_test)), "\n")
+y_train <- train$y
+y_test  <- test$y
+
+cat("Cantidad de predictores después de crear variables dummy:\n")
+ncol(x_train)
+```
+
+## Estandarización
+
+```{r estandarizacion}
+# Los parámetros de centrado y escalado se calculan SOLO con x_train, y
+# luego se aplican también a x_test. Así x_test nunca influye en cómo se
+# estandarizan los datos (se evita Data Leakage).
+preproc <- preProcess(
+  x_train,
+  method = c("center", "scale")
+)
+
+x_train_std <- predict(preproc, x_train)
+x_test_std  <- predict(preproc, x_test)
+
+summary(x_train_std[, 1:6])
+```
+
+**Análisis del resultado.** Las variables transformadas quedan con media
+cercana a cero y desviación estándar cercana a uno. La misma
+transformación aprendida en `train` fue aplicada a `test`, evitando Data
+Leakage — igual que en el laboratorio.
+
+# Configuración de validación cruzada
+
+```{r control-cv}
+# Igual que en el laboratorio: validación cruzada de 5 folds,
+# sampling = "down" (string built-in de caret, no una función propia)
+# aplica down-sampling automáticamente SOLO dentro de cada fold de
+# entrenamiento, dejando test con la prevalencia real. summaryFunction =
+# twoClassSummary calcula ROC/Sens/Spec en cada fold, por lo que el
+# criterio para elegir hiperparámetros será ROC (AUC), no Accuracy.
+control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  sampling = "down"
+)
+
+print(control)
+```
+
+# Modelos evaluados
+
+## Modelo baseline
+
+```{r baseline}
+# El baseline es el punto de comparación mínimo exigido por el enunciado:
+# un "modelo" que siempre predice la clase mayoritaria de train ("no"),
+# sin usar ninguna variable predictora. Cualquier modelo real debe superar
+# claramente a este baseline para justificar su uso.
+clase_mayoritaria <- names(which.max(table(y_train)))
+cat("Clase mayoritaria en train:", clase_mayoritaria, "\n")
+
+pred_baseline <- factor(
+  rep(clase_mayoritaria, length(y_test)),
+  levels = c("no", "yes")
+)
+
+cm_baseline <- confusionMatrix(pred_baseline, y_test, positive = "yes")
+print(cm_baseline)
+
+cat("\nAccuracy baseline:", round(cm_baseline$overall["Accuracy"], 4), "\n")
+cat("Sensibilidad baseline:", round(cm_baseline$byClass["Sensitivity"], 4), "\n")
+```
+
+**Análisis del resultado.** El baseline logra ~89% de Accuracy solo por
+predecir siempre "no", pero con Sensibilidad 0: nunca identifica un
+cliente que efectivamente acepta el depósito. Confirma que Accuracy sola
+no sirve como métrica principal en este problema.
+
+## Regresión Logística
+
+
+```{r}
+
+# CORRECCIÓN RESPECTO A LA VERSIÓN ANTERIOR: antes calculábamos
+# x_train_std/x_test_std con preProcess() UNA SOLA VEZ, afuera de la
+# validación cruzada. Eso significa que los parámetros de centrado y
+# escalado (media y desviación estándar de cada variable) se calculaban
+# viendo TODO train de una vez, incluyendo lo que en cada fold sería la
+# porción de validación — una fuga leve de información.
+#
+# La corrección es pasar preProcess = c("center", "scale") como
+# ARGUMENTO de train(), en vez de aplicarlo manualmente antes. Así,
+# caret recalcula la media y desviación estándar DENTRO de cada fold,
+# usando solo los datos de entrenamiento de ese fold específico —
+# igual de riguroso que como ya hacíamos con el down-sampling.
+#
+# Por esto también volvemos a usar la fórmula "y ~ ." sobre "train"
+# directo, en vez de x_train_std/y_train: train() con fórmula +
+# preProcess se encarga de las variables dummy y del escalado
+# internamente, fold por fold.
+set.seed(123)
+
+glm_fit <- train(
+  y ~ .,
+  data = train,
+  method = "glm",
+  family = "binomial",
+  metric = "ROC",       # se sigue optimizando por ROC, no Accuracy
+  trControl = control,  # mismo control de siempre (CV 5 folds + down-sampling dentro de fold)
+  preProcess = c("center", "scale")
+)
+
+print(glm_fit)
+```
+### Evaluación en test
+
+```{r evaluacion}
+# Como el modelo ahora se entrenó con "train" original (no con
+# x_train_std), evaluamos directo sobre "test" (no x_test_std). caret
+# aplica automáticamente, por dentro, el mismo preProcess aprendido en
+# el entrenamiento final a cualquier "newdata" que le pasemos a predict().
+
+pred_logit <- predict(glm_fit, newdata = test)
+
+prob_logit <- predict(glm_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_logit <- confusionMatrix(pred_logit, test$y, positive = "yes")
+print(cm_logit)
+
+roc_logit <- roc(test$y, prob_logit, levels = c("no", "yes"), direction = "<")
+auc_logit <- auc(roc_logit)
+cat("AUC Regresión Logística:", round(auc_logit, 4), "\n")
+
+plot(roc_logit, col = "blue", lwd = 3, main = "ROC - Regresión Logística")
+text(0.8, 0.2, paste("AUC =", round(auc_logit, 3)), col = "blue", cex = 1.2)
+```
+
+## KNN (K-Nearest Neighbors)
+
+ KNN no estima una ecuación como la regresión logística: clasifica una
+ observación nueva según la clase mayoritaria entre sus k vecinos más#cercanos, usando distancia euclidiana sobre 
+ los predictores ya
+ estandarizados. Por eso usa x_train_std/x_test_std, igual que en el
+ laboratorio, y no la fórmula sobre datos sin escalar.
+
+ expand.grid() arma la grilla de valores de k a probar. Usamos valores
+ impares para evitar empates en clasificación binaria, igual que la
+ secuencia del laboratorio (seq(3, 25, by = 2)).
+```{r knn-cv}
+# Mismo motivo que en la regresión logística: KNN depende MUCHO de la
+# escala de las variables (calcula distancias), así que es especialmente
+# importante que el escalado no tenga fuga de información. Con
+# preProcess dentro de train(), cada fold recalcula su propio centrado
+# y escalado, en vez de heredar uno calculado sobre todo train.
+set.seed(123)
+
+knn_fit <- train(
+  y ~ .,
+  data = train,
+  method = "knn",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(
+    k = seq(3, 51, by = 4)   # misma grilla ampliada que ya habíamos definido
+  )
+)
+
+print(knn_fit)
+plot(knn_fit, main = "ROC de validación cruzada según k (KNN)")
+
+```
+### Evaluación en test
+
+```{r knn-eval}
+# OJO: acá solo EVALUAMOS el knn_fit que ya se entrenó arriba (chunk
+# knn-cv) — no hace falta volver a llamar a train(), eso solo duplicaría
+# el tiempo de cómputo sin cambiar el resultado (misma semilla, mismos
+# datos, mismo control).
+pred_knn <- predict(knn_fit, newdata = test)
+prob_knn <- predict(knn_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_knn <- confusionMatrix(pred_knn, test$y, positive = "yes")
+print(cm_knn)
+
+roc_knn <- roc(test$y, prob_knn, levels = c("no", "yes"), direction = "<")
+auc_knn <- auc(roc_knn)
+cat("AUC KNN:", round(auc_knn, 4), "\n")
+
+plot(roc_knn, col = "darkgreen", lwd = 3, main = "ROC - KNN")
+text(0.8, 0.2, paste("AUC =", round(auc_knn, 3)), col = "darkgreen", cex = 1.2)
+```
+## SVM Lineal
+
+ SVM es uno de los modelos más lentos de entrenar en datasets grandes,
+ porque su optimización interna (encontrar el hiperplano de margen
+ máximo) escala mal con la cantidad de observaciones. Con ~26,000 filas
+ por fold de entrenamiento y 4 valores de C a probar (4 combinaciones x
+ 5 folds = 20 ajustes de SVM), el tiempo de cómputo puede ser alto si se
+ corre todo de forma secuencial (un ajuste a la vez).
+
+ doParallel permite que caret reparta esos 20 ajustes entre varios
+ núcleos del procesador, entrenándolos simultáneamente en vez de uno por
+ uno. No cambia el resultado (siguen siendo los mismos folds, la misma
+ grilla, el mismo down-sampling dentro de cada fold): solo aprovecha
+ mejor el hardware disponible para que termine más rápido.
+```{r paquete doparalle}
+#install.packages("doParallel")  # descomentar si no lo tienes instalado
+library(doParallel)
+
+```
+ detectCores() cuenta los núcleos físicos/lógicos del procesador. Se usa
+ "- 1" para dejar un núcleo libre, de modo que el resto del computador
+ (RStudio, Windows, otras aplicaciones) no se quede sin recursos mientras
+ el modelo entrena.
+```{r nucleos}
+nucleos_disponibles <- detectCores() - 1
+cat("Núcleos que se usarán en paralelo:", nucleos_disponibles, "\n")
+
+```
+ makeCluster() crea el grupo de procesos paralelos, y registerDoParallel()
+ le dice a caret (específicamente a train(), a través de foreach) que use
+ ese cluster para repartir el trabajo. A partir de aquí, cualquier train()
+ que se llame automáticamente corre en paralelo, porque trainControl() ya
+ tiene allowParallel = TRUE por defecto.
+```{r dispo nocleos}
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+```
+ SVM busca el hiperplano que separa las clases maximizando el margen entre
+ ellas. El único hiperparámetro del kernel lineal es C, el costo de
+ penalización por observaciones mal clasificadas o dentro del margen:
+ C chico -> margen más ancho, más tolerante a errores (menor varianza).
+ C grande -> margen más estrecho, ajusta más al train (mayor varianza).
+
+```{r svm}
+set.seed(123)
+
+svm_lineal <- train(
+  y ~ .,
+  data = train,
+  method = "svmLinear",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(
+    C = c(0.01, 0.1, 1, 10)
+  )
+)
+
+# Cerramos el cluster paralelo apenas termina el entrenamiento, antes de
+# revisar resultados — libera los núcleos reservados para que el resto
+# del computador vuelva a la normalidad.
+stopCluster(cl)
+registerDoSEQ()
+
+print(svm_lineal)
+plot(svm_lineal, main = "ROC de validación cruzada según C (SVM lineal)")
+```
+### Evaluación en test
+
+```{r eval}
+pred_svm_lineal <- predict(svm_lineal, newdata = test)
+
+prob_svm_lineal <- predict(svm_lineal, newdata = test, type = "prob")[, "yes"]
+
+cm_svm_lineal <- confusionMatrix(pred_svm_lineal, test$y, positive = "yes")
+print(cm_svm_lineal)
+
+roc_svm_lineal <- roc(test$y, prob_svm_lineal, levels = c("no", "yes"), direction = "<")
+auc_svm_lineal <- auc(roc_svm_lineal)
+cat("AUC SVM lineal:", round(auc_svm_lineal, 4), "\n")
+
+plot(roc_svm_lineal, col = "steelblue", lwd = 3, main = "ROC - SVM lineal")
+text(0.8, 0.2, paste("AUC =", round(auc_svm_lineal, 3)), col = "steelblue", cex = 1.2)
+```
+
+## SVM con kernel RBF
+
+```{r svm ker}
+# Mismo criterio que SVM lineal, pero con el kernel radial (sigma + C).
+# Usamos la grilla original (no la ampliada) porque el sigma/C que
+# habíamos explorado no tenía margen claro para ampliar sin gastar mucho
+# más tiempo de cómputo, dado que ya vamos justos de días.
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+svm_rbf <- train(
+  y ~ .,
+  data = train,
+  method = "svmRadial",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(
+    sigma = c(0.01, 0.05),
+    C = c(0.5, 1)
+  )
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(svm_rbf)
+plot(svm_rbf, main = "ROC de validación cruzada (SVM RBF)")
+```
+### Evaluación en test
+
+```{r eval svm ker}
+
+pred_svm_rbf <- predict(svm_rbf, newdata = test)
+
+prob_svm_rbf <- predict(svm_rbf, newdata = test, type = "prob")[, "yes"]
+
+cm_svm_rbf <- confusionMatrix(pred_svm_rbf, test$y, positive = "yes")
+print(cm_svm_rbf)
+
+roc_svm_rbf <- roc(test$y, prob_svm_rbf, levels = c("no", "yes"), direction = "<")
+auc_svm_rbf <- auc(roc_svm_rbf)
+cat("AUC SVM RBF:", round(auc_svm_rbf, 4), "\n")
+
+plot(roc_svm_rbf, col = "purple", lwd = 3, main = "ROC - SVM RBF")
+text(0.8, 0.2, paste("AUC =", round(auc_svm_rbf, 3)), col = "purple", cex = 1.2)
+```
+
+## Árbol de clasificación
+
+```{r arbol}
+# A diferencia de KNN y SVM, los árboles (rpart) NO dependen de la escala
+# de las variables ni necesitan variables dummy: las divisiones se hacen
+# variable por variable comparando contra un umbral, y rpart maneja
+# directamente las variables categóricas como factores. Por eso usamos
+# train (el original, sin estandarizar/con dummies), no x_train_std.
+#
+# El hiperparámetro cp (complexity parameter) controla qué tan permisivo
+# es el árbol para seguir creciendo: cp chico -> árbol más grande y
+# complejo (riesgo de sobreajuste); cp grande -> árbol más podado (riesgo
+# de subajuste).
+
+set.seed(123)
+
+arbol_fit <- train(
+  y ~ .,
+  data = train,
+  method = "rpart",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(
+    cp = seq(0.001, 0.05, length.out = 12)
+  )
+)
+
+print(arbol_fit)
+plot(arbol_fit, main = "ROC de validación cruzada según cp (Árbol)")
+```
+### Visualización e importancia de variables
+
+```{r vizuali e impr}
+rpart.plot(
+  arbol_fit$finalModel,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  tweak = 0.8
+)
+
+varImp(arbol_fit) %>%
+  plot(top = 10, main = "Importancia de variables en el árbol")
+```
+### Evaluación en test
+
+```{r evalua arb}
+pred_arbol <- predict(arbol_fit, newdata = test)
+
+prob_arbol <- predict(
+  arbol_fit,
+  newdata = test,
+  type = "prob"
+)[, "yes"]
+
+cm_arbol <- confusionMatrix(pred_arbol, test$y, positive = "yes")
+print(cm_arbol)
+
+roc_arbol <- roc(
+  test$y,
+  prob_arbol,
+  levels = c("no", "yes"),
+  direction = "<"
+)
+auc_arbol <- auc(roc_arbol)
+
+cat("AUC Árbol:", round(auc_arbol, 4), "\n")
+
+plot(roc_arbol, col = "orange", lwd = 3, main = "ROC - Árbol de clasificación")
+text(0.8, 0.2, paste("AUC =", round(auc_arbol, 3)), col = "orange", cex = 1.2)
+```
+## Random Forest
+
+```{r r_forest}
+# Random Forest es un ensamble de muchos árboles entrenados sobre muestras
+# bootstrap de los datos, donde además cada división del árbol solo puede
+# usar un subconjunto aleatorio de "mtry" variables. Esto decorrelaciona
+# los árboles entre sí y reduce la varianza respecto a un único árbol
+# (como vimos en la tabla comparativa del laboratorio, RF suele superar
+# al árbol individual).
+#
+# Igual que el árbol, Random Forest no depende de la escala de las
+# variables, así que entrena sobre "train" original, no x_train_std.
+#
+# El hiperparámetro que caret permite tunear vía train() es "mtry"
+# (cantidad de variables candidatas en cada división). La cantidad de
+# árboles (ntree) se fija aparte, no forma parte de la grilla de caret.
+
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+n_predictores <- ncol(train) - 1   # todas las columnas menos "y"
+
+rf_fit <- train(
+  y ~ .,
+  data = train,
+  method = "rf",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(
+    mtry = c(2, floor(sqrt(n_predictores)), floor(n_predictores / 2))
+  ),
+  ntree = 300   # cantidad de árboles del bosque, fijada fuera de la grilla
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(rf_fit)
+plot(rf_fit, main = "ROC de validación cruzada según mtry (Random Forest)")
+```
+#importancia variables
+```{r iv}
+varImp(rf_fit) %>%
+  plot(top = 10, main = "Importancia de variables en Random Forest")
+```
+### Evaluación en test
+
+```{r ev_rf}
+pred_rf <- predict(rf_fit, newdata = test)
+
+prob_rf <- predict(
+  rf_fit,
+  newdata = test,
+  type = "prob"
+)[, "yes"]
+
+cm_rf <- confusionMatrix(pred_rf, test$y, positive = "yes")
+print(cm_rf)
+
+roc_rf <- roc(
+  test$y,
+  prob_rf,
+  levels = c("no", "yes"),
+  direction = "<"
+)
+auc_rf <- auc(roc_rf)
+
+cat("AUC Random Forest:", round(auc_rf, 4), "\n")
+
+plot(roc_rf, col = "brown", lwd = 3, main = "ROC - Random Forest")
+text(0.8, 0.2, paste("AUC =", round(auc_rf, 3)), col = "brown", cex = 1.2)
+
+```
+## Gradient Boosting
+
+```{r gbostin}
+# Gradient Boosting también es un ensamble de árboles, pero a diferencia
+# de Random Forest (árboles en paralelo, para reducir varianza), los
+# árboles de boosting se construyen de forma SECUENCIAL: cada nuevo árbol
+# intenta corregir los errores (residuos) de los árboles anteriores, para
+# reducir sesgo. Tiene más hiperparámetros que ajustar:
+#   - n.trees: cantidad de árboles/iteraciones de boosting
+#   - interaction.depth: profundidad máxima de cada árbol (complejidad)
+#   - shrinkage: tasa de aprendizaje (qué tanto corrige cada árbol nuevo)
+#   - n.minobsinnode: mínimo de observaciones por nodo terminal
+#
+# Igual que árbol y Random Forest, no depende de la escala de las
+# variables, así que entrena sobre "train" original.
+
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+gbm_fit <- train(
+  y ~ .,
+  data = train,
+  method = "gbm",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(
+    n.trees = c(100, 200),
+    interaction.depth = c(1, 3),
+    shrinkage = c(0.01, 0.1),
+    n.minobsinnode = 10
+  ),
+  verbose = FALSE   # evita que gbm imprima el detalle de cada iteración
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(gbm_fit)
+plot(gbm_fit, main = "ROC de validación cruzada (Gradient Boosting)")
+
+```
+### Evaluación en test
+
+```{r evgbost}
+pred_gbm <- predict(gbm_fit, newdata = test)
+
+prob_gbm <- predict(
+  gbm_fit,
+  newdata = test,
+  type = "prob"
+)[, "yes"]
+
+cm_gbm <- confusionMatrix(pred_gbm, test$y, positive = "yes")
+print(cm_gbm)
+
+roc_gbm <- roc(
+  test$y,
+  prob_gbm,
+  levels = c("no", "yes"),
+  direction = "<"
+)
+auc_gbm <- auc(roc_gbm)
+
+cat("AUC Gradient Boosting:", round(auc_gbm, 4), "\n")
+
+plot(roc_gbm, col = "darkred", lwd = 3, main = "ROC - Gradient Boosting")
+text(0.8, 0.2, paste("AUC =", round(auc_gbm, 3)), col = "darkred", cex = 1.2)
+
+```
+# Discriminación y métricas de validación
+
+```{r comp_c}
+# resamples() junta los resultados de validación cruzada de varios modelos
+# entrenados con el MISMO trainControl (mismos folds exactos), permitiendo
+# comparar no solo el promedio de ROC, sino también la variabilidad entre
+# folds de cada modelo. El baseline no se incluye aquí porque no es un
+# objeto train() con resamples de CV.
+comparacion_cv <- resamples(list(
+  Logistica    = glm_fit,
+  KNN          = knn_fit,
+  SVM_Lineal   = svm_lineal,
+  SVM_RBF      = svm_rbf,
+  Arbol        = arbol_fit,
+  RandomForest = rf_fit,
+  Boosting     = gbm_fit
+))
+
+summary(comparacion_cv)
+
+```
+comparación gráfica
+```{r comp_g}
+# bwplot() muestra un boxplot por modelo, con la distribución del ROC
+# entre los 5 folds de cada uno — no solo el promedio puntual, sino
+# también qué tan estable/variable fue cada modelo entre folds.
+bwplot(comparacion_cv, metric = "ROC")
+
+# dotplot() muestra el promedio con su intervalo de confianza, más fácil
+# de leer para una tabla comparativa directa.
+dotplot(comparacion_cv, metric = "ROC")
+
+```
+## PR-AUC y Log-loss (en validación)
+
+```{r pr_auc}
+
+calcular_metricas_validacion <- function(modelo, nombre) {
+  preds <- modelo$pred
+
+  fg <- preds$yes[preds$obs == "yes"]
+  bg <- preds$yes[preds$obs == "no"]
+
+  pr <- pr.curve(scores.class0 = fg, scores.class1 = bg, curve = FALSE)
+
+  obs_binario <- ifelse(preds$obs == "yes", 1, 0)
+  logloss <- LogLoss(y_pred = preds$yes, y_true = obs_binario)
+
+  data.frame(
+    Modelo = nombre,
+    PR_AUC = pr$auc.integral,
+    LogLoss = logloss
+  )
+}
+
+tabla_pr_logloss <- rbind(
+  calcular_metricas_validacion(glm_fit, "Regresión Logística"),
+  calcular_metricas_validacion(rf_fit, "Random Forest"),
+  calcular_metricas_validacion(gbm_fit, "Gradient Boosting")
+)
+
+print(tabla_pr_logloss)
+```
+# Calidad probabilística y calibración
+
+```{r calibracion sin test}
+# Ordenamos las predicciones de cada modelo por rowIndex (la posición
+# original en train), para que las tres columnas queden alineadas
+# observación por observación. Como los 3 modelos comparten el mismo
+# "control" (mismos folds), esto es válido.
+pred_logit_ord <- glm_fit$pred[order(glm_fit$pred$rowIndex), ]
+pred_rf_ord    <- rf_fit$pred[order(rf_fit$pred$rowIndex), ]
+pred_gbm_ord   <- gbm_fit$pred[order(gbm_fit$pred$rowIndex), ]
+
+# Armamos un solo data.frame: una columna "obs" (la clase real) y una
+# columna de probabilidad de "yes" por modelo.
+calib_df <- data.frame(
+  obs          = pred_logit_ord$obs,
+  Logistica    = pred_logit_ord$yes,
+  RandomForest = pred_rf_ord$yes,
+  Boosting     = pred_gbm_ord$yes
+)
+
+# calibration() agrupa las probabilidades en bins (por defecto deciles) y
+# compara, dentro de cada bin, la proporción REAL de "yes" contra la
+# probabilidad promedio que el modelo predijo ahí. Un modelo perfectamente
+# calibrado cae sobre la diagonal punteada del gráfico.
+cal_obj <- calibration(
+  obs ~ Logistica + RandomForest + Boosting,
+  data = calib_df,
+  class = "yes"
+)
+
+plot(cal_obj, auto.key = list(columns = 3))
+```
+# Selección del umbral
+
+```{r youden}
+# El índice de Youden identifica el punto de la curva ROC que maximiza
+# Sensibilidad + Especificidad - 1, es decir, el punto más alejado de la
+# diagonal de clasificación aleatoria. A diferencia del umbral de costos
+# (que exige que la probabilidad sea "real"), Youden solo necesita que el
+# modelo ORDENE bien a las observaciones — por eso es válido usarlo aunque
+# las probabilidades estén mal calibradas por el down-sampling.
+#
+# Calculamos la ROC de validación cruzada con las predicciones out-of-fold
+# que caret ya guardó ($pred), NO con test.
+
+roc_logit_cv <- roc(
+  response = pred_logit_ord$obs,
+  predictor = pred_logit_ord$yes,
+  levels = c("no", "yes")
+)
+
+roc_rf_cv <- roc(
+  response = pred_rf_ord$obs,
+  predictor = pred_rf_ord$yes,
+  levels = c("no", "yes")
+)
+
+roc_gbm_cv <- roc(
+  response = pred_gbm_ord$obs,
+  predictor = pred_gbm_ord$yes,
+  levels = c("no", "yes")
+)
+
+youden_logit <- coords(
+  roc_logit_cv,
+  x = "best",
+  best.method = "youden",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+
+youden_rf <- coords(
+  roc_rf_cv,
+  x = "best",
+  best.method = "youden",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+
+youden_gbm <- coords(
+  roc_gbm_cv,
+  x = "best",
+  best.method = "youden",
+  ret = c("threshold", "sensitivity", "specificity")
+)
+
+cat("=== Umbral Youden - Regresión Logística ===\n")
+print(youden_logit)
+
+cat("\n=== Umbral Youden - Random Forest ===\n")
+print(youden_rf)
+
+cat("\n=== Umbral Youden - Gradient Boosting ===\n")
+print(youden_gbm)
+
+```
+umbral final
+```{r}
+umbral_final <- as.numeric(youden_gbm["threshold"])
+```
+
+## Definición de costos
+
+```{r definicion-costos-temprano}
+# CF_P (falso positivo): costo de una llamada sin resultado.
+# CF_N (falso negativo): costo de una venta potencial perdida.
+# Supuesto: el valor de una venta perdida es ~5 veces el costo de una
+# llamada sin resultado.
+costo_fp <- 1
+costo_fn <- 5
+
+# Funcion auxiliar para calcular el costo total dado un vector de
+# predicciones y las clases reales:
+calcular_costo <- function(pred, real, costo_fp, costo_fn) {
+  cm <- confusionMatrix(pred, real, positive = "yes")
+  tabla <- cm$table
+  fp <- tabla["yes", "no"]
+  fn <- tabla["no", "yes"]
+  fp * costo_fp + fn * costo_fn
+}
+```
+## Sensibilidad del umbral a los supuestos de costo
+
+```{r sensibilidad del umbral}
+razones_prueba <- c(2, 3, 5, 8, 10)
+
+sensibilidad_costos <- data.frame()
+for (razon in razones_prueba) {
+  cfn_prueba <- razon * costo_fp
+  umbral_prueba <- costo_fp / (costo_fp + cfn_prueba)
+
+  pred_prueba <- factor(
+    ifelse(pred_gbm_ord$yes >= umbral_prueba, "yes", "no"),
+    levels = c("no", "yes")
+  )
+
+  costo_total <- calcular_costo(pred_prueba, pred_gbm_ord$obs, costo_fp, cfn_prueba)
+
+  sensibilidad_costos <- rbind(sensibilidad_costos, data.frame(
+    Razon_CFN_CFP = razon,
+    Umbral = umbral_prueba,
+    Costo_total = costo_total
+  ))
+}
+
+print(sensibilidad_costos)
+
+ggplot(sensibilidad_costos, aes(x = Razon_CFN_CFP, y = Umbral)) +
+  geom_line() + geom_point() +
+  labs(title = "Sensibilidad del umbral a la razón de costos CF_N/CF_P",
+       x = "Razón CF_N / CF_P", y = "Umbral resultante")
+```
+
+## Comparación: Youden vs. costos
+
+```{r comparacion youvscost}
+# costo_fp, costo_fn y calcular_costo() ya se definieron arriba, en el
+# chunk "definicion-costos-temprano" — no se vuelven a definir acá para
+# evitar tener el mismo supuesto de costos duplicado en dos lugares.
+
+# Umbral que minimiza el costo esperado, según la regla de Bayes con
+# costos vista en clase: c* = CF_P / (CF_P + CF_N)
+umbral_costos <- costo_fp / (costo_fp + costo_fn)
+cat("Umbral basado en costos:", round(umbral_costos, 4), "\n")
+
+# Comparamos ambos criterios SOLO con las predicciones de validación
+# cruzada de Boosting (pred_gbm_ord), sin tocar test todavía.
+pred_gbm_youden_cv <- factor(
+  ifelse(pred_gbm_ord$yes >= umbral_final, "yes", "no"),
+  levels = c("no", "yes")
+)
+
+pred_gbm_costos_cv <- factor(
+  ifelse(pred_gbm_ord$yes >= umbral_costos, "yes", "no"),
+  levels = c("no", "yes")
+)
+
+comparacion_umbrales <- data.frame(
+  Criterio = c("Youden", "Costos"),
+  Umbral = c(umbral_final, umbral_costos),
+  Costo_total_CV = c(
+    calcular_costo(pred_gbm_youden_cv, pred_gbm_ord$obs, costo_fp, costo_fn),
+    calcular_costo(pred_gbm_costos_cv, pred_gbm_ord$obs, costo_fp, costo_fn)
+  )
+)
+
+print(comparacion_umbrales)
+```
+El umbral basado en costos (0.1667) resulta en un costo total mayor (27,493) que el umbral de Youden (0.4874, costo 10,947), a pesar de que la fórmula de costos es teóricamente óptima. Esto se debe a que dicha fórmula asume probabilidades bien calibradas, mientras que el gráfico de calibración (Sección 10) mostró que Gradient Boosting sobre-estima sistemáticamente la probabilidad de "yes" por efecto del down-sampling dentro de cada fold. El umbral de Youden, al depender solo del ranking relativo (no del valor absoluto de la probabilidad), resulta más robusto ante esta falta de calibración. Por este motivo, se selecciona el umbral de Youden (0.4874) como punto de operación del sistema final.
+# Modelo seleccionado y test final
+
+```{r sistema congelado}
+# El sistema queda congelado con: algoritmo = Gradient Boosting (gbm_fit,
+# con los hiperparámetros ya elegidos por validación cruzada), y umbral =
+# umbral_final (Youden, 0.4874), seleccionado en la sección anterior SIN
+# haber mirado test. A partir de aquí, "test" se abre UNA sola vez.
+
+cat("=== SISTEMA FINAL CONGELADO ===\n")
+cat("Modelo: Gradient Boosting\n")
+cat("Umbral:", round(umbral_final, 4), "(índice de Youden, elegido en validación)\n\n")
+
+# prob_gbm ya se calculó antes (predict de gbm_fit sobre test). Aplicamos
+# el umbral final, en vez del 0.5 usado en la comparación preliminar.
+pred_final <- factor(
+  ifelse(prob_gbm >= umbral_final, "yes", "no"),
+  levels = c("no", "yes")
+)
+
+cm_final <- confusionMatrix(pred_final, test$y, positive = "yes")
+print(cm_final)
+
+cat("\n=== RESULTADO DEL SISTEMA FINAL (TEST, UNA SOLA VEZ) ===\n")
+cat("Accuracy:", round(cm_final$overall["Accuracy"], 4), "\n")
+cat("Sensibilidad:", round(cm_final$byClass["Sensitivity"], 4), "\n")
+cat("Especificidad:", round(cm_final$byClass["Specificity"], 4), "\n")
+cat("Precisión:", round(cm_final$byClass["Precision"], 4), "\n")
+cat("F1:", round(cm_final$byClass["F1"], 4), "\n")
+
+# Número de acciones: cuántas llamadas haría el banco según este sistema
+n_llamadas <- sum(pred_final == "yes")
+cat("\nNúmero de acciones (llamadas a realizar):", n_llamadas, "de", length(pred_final), "clientes en test\n")
+
+# Costo total en TEST (una sola vez, con el sistema ya congelado):
+costo_total_test <- calcular_costo(pred_final, test$y, costo_fp, costo_fn)
+cat("Costo total en test:", costo_total_test, "\n")
+
+```
+## Comparación con el baseline
+
+```{r tabla final}
+tabla_final_vs_baseline <- data.frame(
+  Sistema = c("Baseline (siempre 'no')", "Gradient Boosting (umbral Youden)"),
+  Accuracy = c(cm_baseline$overall["Accuracy"], cm_final$overall["Accuracy"]),
+  Sensibilidad = c(cm_baseline$byClass["Sensitivity"], cm_final$byClass["Sensitivity"]),
+  Especificidad = c(cm_baseline$byClass["Specificity"], cm_final$byClass["Specificity"]),
+  Numero_acciones = c(0, n_llamadas)
+)
+
+print(tabla_final_vs_baseline)
+
+```
+
+## Tabla mínima del sistema final (Validación vs. Test)
+
+```{r tabla-minima-sistema-final}
+# La pauta exige esta tabla específica, comparando el MISMO sistema
+# (Gradient Boosting + umbral de Youden 0.4874) en dos momentos: cómo se
+# veía en validación (donde se decidió todo, sin mirar test) y cómo
+# resultó en test (abierto una sola vez, al final). No es una tabla de
+# comparación ENTRE modelos — es "antes y después" del mismo sistema ya
+# congelado.
+
+# --- Lado validación: aplicamos el umbral de Youden sobre las
+# predicciones de validación cruzada de Boosting (pred_gbm_ord), que ya
+# calculamos en la sección de Umbral ---
+cm_final_valid <- confusionMatrix(pred_gbm_youden_cv, pred_gbm_ord$obs, positive = "yes")
+
+fg_valid <- pred_gbm_ord$yes[pred_gbm_ord$obs == "yes"]
+bg_valid <- pred_gbm_ord$yes[pred_gbm_ord$obs == "no"]
+prauc_valid <- pr.curve(scores.class0 = fg_valid, scores.class1 = bg_valid, curve = FALSE)$auc.integral
+
+logloss_valid <- LogLoss(
+  y_pred = pred_gbm_ord$yes,
+  y_true = ifelse(pred_gbm_ord$obs == "yes", 1, 0)
+)
+
+costo_valid <- calcular_costo(pred_gbm_youden_cv, pred_gbm_ord$obs, costo_fp, costo_fn)
+acciones_valid <- sum(pred_gbm_youden_cv == "yes")
+
+# --- Lado test: mismo cálculo, pero sobre el sistema ya evaluado en la
+# sección anterior (cm_final, prob_gbm, pred_final, n_llamadas) ---
+fg_test <- prob_gbm[test$y == "yes"]
+bg_test <- prob_gbm[test$y == "no"]
+prauc_test <- pr.curve(scores.class0 = fg_test, scores.class1 = bg_test, curve = FALSE)$auc.integral
+
+logloss_test <- LogLoss(
+  y_pred = prob_gbm,
+  y_true = ifelse(test$y == "yes", 1, 0)
+)
+
+# --- Tabla final, en el formato exacto que pide la pauta ---
+tabla_sistema_final <- data.frame(
+  Indicador = c("Umbral", "Precision", "Recall", "F1", "PR-AUC",
+                "Log-loss", "Costo total", "Número de acciones"),
+  Validacion = c(
+    round(umbral_final, 4),
+    round(unname(cm_final_valid$byClass["Precision"]), 4),
+    round(unname(cm_final_valid$byClass["Sensitivity"]), 4),
+    round(unname(cm_final_valid$byClass["F1"]), 4),
+    round(prauc_valid, 4),
+    round(logloss_valid, 4),
+    costo_valid,
+    acciones_valid
+  ),
+  Test_final = c(
+    round(umbral_final, 4),
+    round(unname(cm_final$byClass["Precision"]), 4),
+    round(unname(cm_final$byClass["Sensitivity"]), 4),
+    round(unname(cm_final$byClass["F1"]), 4),
+    round(prauc_test, 4),
+    round(logloss_test, 4),
+    costo_total_test,
+    n_llamadas
+  )
+)
+
+print(tabla_sistema_final)
+
+knitr::kable(tabla_sistema_final,
+             col.names = c("Indicador", "Validación", "Test final"),
+             caption = "Tabla mínima del sistema final: Gradient Boosting + umbral de Youden")
+```
+
+**Análisis del resultado.** Las métricas de validación y test deberían
+quedar razonablemente parecidas (no idénticas) — si hubiera una
+diferencia muy grande entre ambas columnas, sería señal de que el
+sistema no generaliza bien fuera de los datos con los que se decidió.
+
+# Interpretación, errores y subgrupos
+
+```{r interpretacion}
+# Igual que con Random Forest, varImp() funciona con cualquier modelo de
+# caret, incluyendo gbm. Mide qué tanto contribuye cada variable a reducir
+# el error del modelo en promedio, a través de los árboles secuenciales.
+# RECORDATORIO IMPORTANTE: esto indica utilidad predictiva dentro del
+# modelo, NO causalidad — una variable importante no significa que
+# cambiarla artificialmente cambiaría el comportamiento real del cliente.
+#install.packages("gbm")
+library(gbm)
+varImp(gbm_fit) %>%
+  plot(top = 10, main = "Importancia de variables - Gradient Boosting (modelo final)")
+
+# También como tabla, para citar valores exactos en el texto del informe:
+importancia_gbm <- varImp(gbm_fit)$importance
+importancia_gbm <- importancia_gbm[order(-importancia_gbm$Overall), , drop = FALSE]
+head(importancia_gbm, 10)
+
+```
+## Falsos positivos y falsos negativos
+
+```{r fn fs}
+# Armamos un data.frame con el resultado de cada cliente de test: si fue
+# TP, TN, FP o FN, según la predicción final vs. la clase real.
+analisis_errores <- test %>%
+  mutate(
+    prediccion = pred_final,
+    resultado = case_when(
+      y == "yes" & prediccion == "yes" ~ "Verdadero Positivo",
+      y == "no"  & prediccion == "no"  ~ "Verdadero Negativo",
+      y == "no"  & prediccion == "yes" ~ "Falso Positivo",
+      y == "yes" & prediccion == "no"  ~ "Falso Negativo"
+    )
+  )
+
+# Comparamos el perfil promedio de los Falsos Negativos (clientes que sí
+# aceptaban pero el modelo no detectó) contra los Verdaderos Positivos
+# (los que sí detectó), para ver qué los distingue:
+analisis_errores %>%
+  filter(resultado %in% c("Falso Negativo", "Verdadero Positivo")) %>%
+  group_by(resultado) %>%
+  summarise(
+    edad_promedio = mean(age),
+    contactos_previos_promedio = mean(previous),
+    campaign_promedio = mean(campaign),
+    pct_poutcome_success = mean(poutcome == "success"),
+    .groups = "drop"
+  )
+
+# Mismo análisis para Falsos Positivos vs Verdaderos Negativos:
+analisis_errores %>%
+  filter(resultado %in% c("Falso Positivo", "Verdadero Negativo")) %>%
+  group_by(resultado) %>%
+  summarise(
+    edad_promedio = mean(age),
+    contactos_previos_promedio = mean(previous),
+    campaign_promedio = mean(campaign),
+    pct_poutcome_success = mean(poutcome == "success"),
+    .groups = "drop"
+  )
+```
+## Auditoría de subgrupo (mes)
+
+```{r auditoria mes}
+# Auditamos el sistema final (Gradient Boosting + umbral de Youden) por
+# mes, ya que el EDA (Sección 4) mostró que la prevalencia real de "yes"
+# varía bastante entre meses. Esto permite ver si el modelo funciona
+# igual de bien para todos los meses, o si hay meses donde falla más.
+auditoria_mes <- data.frame(
+  month = test$month,
+  real = test$y,
+  pred = pred_final
+)
+
+# Si algún mes no tiene ambas clases representadas, no se puede calcular
+# Sensibilidad/Especificidad de forma confiable para ese mes.
+calcular_metricas_subgrupo <- function(df) {
+  if (length(unique(df$real)) < 2) {
+    return(data.frame(
+      Prevalencia_real = mean(df$real == "yes"),
+      Soporte = nrow(df),
+      Sensibilidad = NA,
+      Especificidad = NA,
+      Precision = NA
+    ))
+  }
+
+  cm <- confusionMatrix(df$pred, df$real, positive = "yes")
+
+  data.frame(
+    Prevalencia_real = mean(df$real == "yes"),
+    Soporte = nrow(df),
+    Sensibilidad = cm$byClass["Sensitivity"],
+    Especificidad = cm$byClass["Specificity"],
+    Precision = cm$byClass["Precision"]
+  )
+}
+
+tabla_por_mes <- auditoria_mes %>%
+  group_by(month) %>%
+  group_modify(~ calcular_metricas_subgrupo(.x)) %>%
+  ungroup() %>%
+  arrange(desc(Soporte))
+
+print(tabla_por_mes)
+
+# Gráfico de Sensibilidad por mes, para ver de un vistazo si hay meses
+# donde el sistema detecta muy pocos clientes reales. Meses con poco
+# soporte dan métricas inestables/ruidosas: hay que interpretarlas con
+# cautela, no sacar conclusiones fuertes de un grupo con pocos datos.
+tabla_por_mes %>%
+  filter(!is.na(Sensibilidad)) %>%
+  ggplot(aes(x = reorder(month, Sensibilidad), y = Sensibilidad)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Sensibilidad del sistema final por mes",
+    x = "Mes",
+    y = "Sensibilidad"
+  )
+```
+# Tabla comparativa completa (los 8 modelos)
+
+<!-- costo_fp, costo_fn y calcular_costo() ya están definidos desde el
+     chunk "definicion-costos-temprano" (antes del índice de Youden) —
+     se usan tal cual acá abajo, sin volver a definirlos. -->
+
+
+```{r tabla atualizada}
+# Esta función calcula, para UN modelo, las 9 columnas que exige la
+# tabla obligatoria de la pauta (ROC-AUC, PR-AUC, Log-loss, Precision,
+# Recall, Especificidad, F1, Costo, Volumen), usando las predicciones de
+# validación cruzada ($pred) que caret ya guardó automáticamente gracias
+# a savePredictions = "final" en el control. No usa test en ningún
+# momento, tal como exige la Sección 9 (comparar SOLO en validación).
+calcular_fila_completa <- function(modelo, nombre) {
+  preds <- modelo$pred
+
+  # Si el modelo tuvo algún problema numérico en algún fold (le pasó a
+  # SVM RBF), puede haber filas con NA en la probabilidad predicha.
+  # Las descartamos antes de calcular las métricas, dejando registro de
+  # cuántas se sacaron, para no romper pr.curve()/roc()/LogLoss().
+  n_na <- sum(is.na(preds$yes))
+  if (n_na > 0) {
+    cat("Advertencia:", nombre, "- se descartaron", n_na, "predicciones con NA\n")
+    preds <- preds[!is.na(preds$yes), ]
+  }
+
+  # ROC-AUC: área bajo la curva ROC, mide qué tan bien el modelo ordena
+  # a los clientes de mayor a menor probabilidad de aceptar.
+  roc_obj <- roc(preds$obs, preds$yes, levels = c("no", "yes"), direction = "<", quiet = TRUE)
+  roc_auc <- as.numeric(auc(roc_obj))
+
+  # PR-AUC: similar a ROC-AUC, pero no se deja engañar por el desbalance
+  # de clases (~11% "yes"). fg = probabilidades de los "yes" reales
+  # (foreground), bg = probabilidades de los "no" reales (background).
+  fg <- preds$yes[preds$obs == "yes"]
+  bg <- preds$yes[preds$obs == "no"]
+  pr_auc <- pr.curve(scores.class0 = fg, scores.class1 = bg, curve = FALSE)$auc.integral
+
+  # Log-loss: mide qué tan "confiables" son las probabilidades en sí
+  # mismas (no solo el orden). Penaliza fuerte estar muy seguro y
+  # equivocarse. Convertimos "yes"/"no" a 1/0 porque LogLoss() lo pide así.
+  obs_binario <- ifelse(preds$obs == "yes", 1, 0)
+  logloss <- LogLoss(y_pred = preds$yes, y_true = obs_binario)
+
+  # Para Precision/Recall/Especificidad/F1/Costo/Volumen necesitamos una
+  # clase concreta (no una probabilidad), así que aplicamos el umbral
+  # tradicional de 0.5 acá — esto es solo para que los 8 modelos se
+  # comparen en el MISMO punto operacional; el umbral final de Youden se
+  # aplica más adelante, solo al modelo elegido.
+  pred_05 <- factor(ifelse(preds$yes >= 0.5, "yes", "no"), levels = c("no", "yes"))
+  cm <- confusionMatrix(pred_05, preds$obs, positive = "yes")
+
+  # calcular_costo() ya la definimos antes (en el bloque de umbral de
+  # costos): fp*costo_fp + fn*costo_fn. Volumen = cuántas veces predijo "yes".
+  costo <- calcular_costo(pred_05, preds$obs, costo_fp, costo_fn)
+  volumen <- sum(pred_05 == "yes")
+
+  # unname() es importante: sin esto, cm$byClass["Precision"] arrastra el
+  # texto "Precision" como nombre, y ese nombre termina apareciendo como
+  # nombre de FILA al juntar todo con rbind() más abajo, dejando la tabla
+  # con etiquetas feas en vez de números de fila limpios.
+  data.frame(
+    Modelo = nombre,
+    ROC_AUC = roc_auc,
+    PR_AUC = pr_auc,
+    Log_loss = logloss,
+    Precision = unname(cm$byClass["Precision"]),
+    Recall = unname(cm$byClass["Sensitivity"]),
+    Especificidad = unname(cm$byClass["Specificity"]),
+    F1 = unname(cm$byClass["F1"]),
+    Costo = costo,
+    Volumen = volumen
+  )
+}
+
+# El baseline se calcula APARTE porque no es un objeto train() con
+# validación cruzada — no tiene $pred. Para que sea comparable con las
+# otras 7 filas (todas evaluadas en validación, nunca en test), armamos
+# un "baseline de validación": predice "no" para cada observación que
+# aparece en pred_gbm_ord$obs (la unión de las 5 particiones de
+# validación cruzada, out-of-fold), en vez de evaluarlo sobre test.
+# Antes esta fila se calculaba con test$y, lo cual mezclaba dos universos
+# distintos dentro de la misma tabla — se corrige acá.
+pred_baseline_cv <- factor(
+  rep("no", nrow(pred_gbm_ord)),
+  levels = c("no", "yes")
+)
+
+cm_baseline_cv <- confusionMatrix(
+  pred_baseline_cv,
+  pred_gbm_ord$obs,
+  positive = "yes"
+)
+
+# ROC-AUC/PR-AUC/Log-loss/Precision quedan como NA porque el baseline
+# nunca predice "yes", por lo que esas métricas no se pueden calcular de
+# forma significativa para él.
+fila_baseline <- data.frame(
+  Modelo = "Baseline",
+  ROC_AUC = NA,
+  PR_AUC = NA,
+  Log_loss = NA,
+  Precision = NA,
+  Recall = unname(cm_baseline_cv$byClass["Sensitivity"]),
+  Especificidad = unname(cm_baseline_cv$byClass["Specificity"]),
+  F1 = unname(cm_baseline_cv$byClass["F1"]),
+  Costo = calcular_costo(pred_baseline_cv, pred_gbm_ord$obs, costo_fp, costo_fn),
+  Volumen = 0
+)
+
+# rbind() apila todas las filas (una por modelo) en una sola tabla,
+# llamando a calcular_fila_completa() una vez por cada uno de los 7
+# modelos con predictores, más la fila del baseline ya calculada aparte.
+tabla_comparativa_completa <- rbind(
+  fila_baseline,
+  calcular_fila_completa(glm_fit, "Regresión Logística"),
+  calcular_fila_completa(knn_fit, "KNN"),
+  calcular_fila_completa(svm_lineal, "SVM Lineal"),
+  calcular_fila_completa(svm_rbf, "SVM RBF"),
+  calcular_fila_completa(arbol_fit, "Árbol"),
+  calcular_fila_completa(rf_fit, "Random Forest"),
+  calcular_fila_completa(gbm_fit, "Gradient Boosting")
+)
+
+# Ordenamos de mayor a menor ROC-AUC, para que el mejor modelo quede
+# arriba y sea fácil de identificar de un vistazo.
+tabla_comparativa_completa <- tabla_comparativa_completa[order(-tabla_comparativa_completa$ROC_AUC), ]
+
+# rownames(...) <- NULL limpia los números/etiquetas de fila que R deja
+# después del rbind()+order() (por ejemplo "3", "7", "Precision6"),
+# dejando la tabla con una numeración simple y ordenada al imprimirla.
+rownames(tabla_comparativa_completa) <- NULL
+
+# Columna "Subgrupo": la pauta la exige en la tabla, pero según la
+# Rúbrica (dimensión "Equidad y subgrupos"), el análisis detallado de
+# subgrupo se pide sobre el SISTEMA FINAL, no repetido para los 8
+# modelos candidatos. Por eso esta columna es solo una referencia de
+# dónde está ese análisis (Sección 13), no un número recalculado aquí.
+tabla_comparativa_completa$Subgrupo <- "Ver Sección 13 (detalle por mes, modelo final)"
+
+print(tabla_comparativa_completa)
+
+# Versión con formato más limpio (tabla en vez de texto plano), lista
+# para que se vea bien al generar el HTML final del informe:
+knitr::kable(tabla_comparativa_completa, digits = 4,
+             caption = "Tabla comparativa de validación cruzada (los 8 modelos)")
+```
+
+# Exportación de figuras y resultados
+
+```{r crear-carpetas}
+# Creamos las carpetas figuras/ y resultados/ si no existen (recursive =
+# TRUE crea también carpetas intermedias si hicieran falta; showWarnings
+# = FALSE evita el aviso de "ya existe" si se corre el Knit más de una
+# vez). Se crean relativas a la carpeta donde vive este .Rmd.
+dir.create("figuras", showWarnings = FALSE, recursive = TRUE)
+dir.create("resultados", showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r exportar-tablas}
+# Tablas clave exportadas como CSV a resultados/, además de mostrarse en
+# el HTML — así quedan disponibles como archivos sueltos para anexar o
+# revisar sin tener que abrir el informe completo.
+write.csv(tabla_comparativa_completa, "resultados/tabla_comparativa_8_modelos.csv", row.names = FALSE)
+write.csv(comparacion_umbrales, "resultados/comparacion_umbrales.csv", row.names = FALSE)
+write.csv(sensibilidad_costos, "resultados/sensibilidad_umbral_costos.csv", row.names = FALSE)
+write.csv(tabla_sistema_final, "resultados/tabla_sistema_final_val_vs_test.csv", row.names = FALSE)
+write.csv(tabla_por_mes, "resultados/auditoria_subgrupo_mes.csv", row.names = FALSE)
+
+cat("Tablas exportadas a resultados/:\n")
+print(list.files("resultados"))
+```
+
+```{r exportar-figuras}
+# Figuras clave exportadas como PNG a figuras/. Los gráficos base de R
+# (roc(), plot() de caret) se capturan abriendo un dispositivo png() y
+# cerrándolo con dev.off(); los de ggplot2 se guardan con ggsave().
+
+# ROC del modelo final (Gradient Boosting) en test
+png("figuras/roc_gbm_test.png", width = 1200, height = 900, res = 150)
+plot(roc_gbm, col = "darkred", lwd = 3, main = "ROC - Gradient Boosting (test)")
+text(0.8, 0.2, paste("AUC =", round(auc_gbm, 3)), col = "darkred", cex = 1.2)
+dev.off()
+
+# Comparación de validación cruzada entre los 8 modelos (resamples)
+png("figuras/comparacion_cv_modelos.png", width = 1400, height = 900, res = 150)
+print(dotplot(comparacion_cv, metric = "ROC"))
+dev.off()
+
+# Curva de calibración de los 3 candidatos
+png("figuras/calibracion_candidatos.png", width = 1200, height = 900, res = 150)
+plot(cal_obj, auto.key = list(columns = 3))
+dev.off()
+
+# Sensibilidad del umbral a la razón de costos
+ggsave(
+  "figuras/sensibilidad_umbral_costos.png",
+  ggplot(sensibilidad_costos, aes(x = Razon_CFN_CFP, y = Umbral)) +
+    geom_line() + geom_point() +
+    labs(title = "Sensibilidad del umbral a la razón de costos CF_N/CF_P",
+         x = "Razón CF_N / CF_P", y = "Umbral resultante"),
+  width = 7, height = 5, dpi = 150
+)
+
+# Importancia de variables del modelo final
+png("figuras/importancia_variables_gbm.png", width = 1200, height = 900, res = 150)
+plot(varImp(gbm_fit), top = 10, main = "Importancia de variables - Gradient Boosting")
+dev.off()
+
+# Sensibilidad del sistema final por mes (subgrupo)
+ggsave(
+  "figuras/sensibilidad_por_mes.png",
+  tabla_por_mes %>%
+    filter(!is.na(Sensibilidad)) %>%
+    ggplot(aes(x = reorder(month, Sensibilidad), y = Sensibilidad)) +
+    geom_col() + coord_flip() +
+    labs(title = "Sensibilidad del sistema final por mes", x = "Mes", y = "Sensibilidad"),
+  width = 7, height = 5, dpi = 150
+)
+
+cat("Figuras exportadas a figuras/:\n")
+print(list.files("figuras"))
+```
+
+```{r session-info}
+# Documenta la versión exacta de R y de los paquetes usados. Recordar:
+# se observaron diferencias en resultados de SVM RBF entre integrantes
+# del equipo usando distintas versiones de R (4.5.3 vs 4.6.1) — dejar
+# esto documentado ayuda a explicar esa diferencia si vuelve a aparecer.
+sessionInfo()
+```
+
+
