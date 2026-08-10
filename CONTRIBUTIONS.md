@@ -11,35 +11,49 @@ Este documento detalla las tareas principales, productos elaborados y revisiones
 **Rol:** Formulación, datos y coordinación
 
 **Tareas principales:**
-- [PENDIENTE — completar, ej: "Formulación del problema de negocio, búsqueda y evaluación de datasets alternativos"] martina
-- [PENDIENTE — ej: "Investigación de fuente, licencia y DOI del dataset (Sección 2)"] saba
-- [PENDIENTE — ej: "Consolidación final del informe.Rmd y coordinación de la migración de código"] vale
-- [PENDIENTE — ej: "Redacción de DATASET_README.md y README.md"]
-- [PENDIENTE — ej: "Preparación de variables, codificación dummy y estandarización (Sección 6)"] parte alex izac
+•⁠  ⁠Formulación del problema de negocio y justificación para Ingeniería
+  Industrial.
+•⁠  ⁠Búsqueda y verificación de la fuente del dataset (UCI, licencia CC
+  BY 4.0, DOI).
+•⁠  ⁠Diseño del experimento de partición aleatoria vs. temporal (AUC
+  0.775 vs. 0.714).
+•⁠  ⁠Consolidación del ⁠ informe.Rmd ⁠ bajo la estructura de 14 secciones.
+•⁠  ⁠Redacción de ⁠ DATASET_README.md ⁠, ⁠ README.md ⁠ y ⁠ CONTRIBUTIONS.md ⁠.
+
 **Productos elaborados:**
-- [PENDIENTE — ej: "propuesta_problema.pdf", "DATASET_README.md", "README.md", "informe.Rmd consolidado"]
+•⁠  ⁠⁠ DATASET_README.md ⁠, ⁠ README.md ⁠, ⁠ CONTRIBUTIONS.md ⁠.
+•⁠  ⁠⁠ informe.Rmd ⁠ consolidado (Secciones 1, 2, 4.3, 5 y 13).
 
-**Revisión cruzada realizada:**
-- Revisé el código de: [PENDIENTE — nombre del integrante y qué sección/modelo]
-- Comentarios/correcciones aportadas: [PENDIENTE]
-
+Revisión cruzada realizada:
+•⁠  ⁠Valentina Quiroz: apoyo en el código de KNN.
+•⁠  ⁠Martina Bedwell: apoyo en la partición 80/20, planteando el
+  argumento del drift de prevalencia como justificación.
+•⁠  ⁠Izaak Ulloa: revisión del código de Random Forest.
+•⁠  ⁠Sebastián Quintolén: apoyo en clasificación y selección de umbral,
+  buscando el contenido del curso aplicable.
 ---
 
 ## Martina Bedwell
 
-**Rol:** Preparación y modelos probabilísticos
+**Rol**: Preparación y modelos probabilísticos
 
-**Tareas principales:**
-- [PENDIENTE — ej: "Baseline y regresión logística (Sección 7.1)"] seba
-- [PENDIENTE — ej: "Preparación de variables, codificación dummy y estandarización (Sección 6)"] parte alex izaac
-- [PENDIENTE — ej: "particion 80/20 alex 
+**Tareas principales**:
+•⁠  ⁠Implementación y análisis del baseline y regresión logística (Sección 7.1)
+•⁠  ⁠Evaluación e interpretación del desempeño de la regresión logística dentro del esquema de validación cruzada
+•⁠  ⁠Apoyo en la revisión de la partición estratificada 80/20 y coherencia del pipeline de modelamiento
 
 **Productos elaborados:**
-- [PENDIENTE — ej: chunks "baseline", "logit-cv", "particion" en informe.Rmd] vale crear chunks
+•⁠  ⁠chunks "baseline" y "logit-cv" en informe.Rmd
 
 **Revisión cruzada realizada:**
-- Revisé el código de: [PENDIENTE]
-- Comentarios/correcciones aportadas: [PENDIENTE]
+•⁠  ⁠Revisé el código de: Alex Astudillo
+•⁠  ⁠Comentarios/correcciones aportadas: Formulación del problema de negocio y definición de la decisión predictiva
+
+•⁠  ⁠Revisé el código de: Sebastián Quintolén
+•⁠  ⁠Comentarios/correcciones aportadas: Comparación de modelos, diagnóstico de calibración y selección del umbral operacional
+
+•⁠  ⁠Revisé el código de: Izaak Ulloa
+•⁠  ⁠Comentarios/correcciones aportadas: Revisión de los resultados y chunks correspondientes a Árbol de clasificación, Random Forest y Gradient Boosting
 
 ---
 
@@ -60,20 +74,29 @@ Este documento detalla las tareas principales, productos elaborados y revisiones
 
 ---
 
+
 ## Izaak Ulloa
 
-**Rol:** Árboles y ensembles
+**Rol:** Arboles y Ensambles
 
 **Tareas principales:**
-- [PENDIENTE — ej: "Árbol de clasificación, Random Forest y Gradient Boosting (Sección 7.4-7.5)"] (alex seba vale)
-- [PENDIENTE — ej: "Importancia de variables para los tres modelos de árboles"]
+•⁠  ⁠Árbol de clasificación, Random Forest y Gradient Boosting
 
 **Productos elaborados:**
-- [PENDIENTE — ej: chunks "arbol", "r-forest", "gboosting" en informe.Rmd] martina
+•⁠  ⁠Árbol de decisión, r-forest y gboosting en "informe.rmd"
 
 **Revisión cruzada realizada:**
-- Revisé el código de: [PENDIENTE]
-- Comentarios/correcciones aportadas: [PENDIENTE]
+•⁠  ⁠Revisé el código de: Alex Astudillo
+•⁠  ⁠Comentarios/correcciones aportadas: Sugerir eliminar la variable "duration", ya que ésta puede sesgar la predicción.
+
+•⁠  ⁠Revisé el código de: Martina Bedwell
+•⁠  ⁠Comentarios/correcciones aportadas: Revisión de la preparación de las variables.
+
+•⁠  ⁠Revisé el código de: Valentina Quiroz
+•⁠  ⁠Comentarios/correcciones aportadas: Revisión del ajuste de grillas.
+
+•⁠  ⁠Revisé el código de: Sebastián Quintolén
+•⁠  ⁠Comentarios/correcciones aportadas: Revisión del índice de Youden.
 
 ---
 
@@ -82,16 +105,24 @@ Este documento detalla las tareas principales, productos elaborados y revisiones
 **Rol:** Evaluación y decisión
 
 **Tareas principales:**
-- [PENDIENTE — ej: "Comparación formal de validación cruzada, calibración y selección de umbral (Secciones 8-11)"] (alex vale martina)
-- [PENDIENTE — ej: "Análisis de sensibilidad de costos, sistema final congelado y auditoría de subgrupo"]
+•⁠  ⁠Comparación formal de validación cruzada, calibración y selección de umbral
+•⁠  ⁠Análisis de sensibilidad de costos, sistema final congelado y auditoría de subgrupo
 
 **Productos elaborados:**
-- [PENDIENTE — ej: chunks "comp-c", "calibracion-sin-test", "youden", "sistema-congelado", "auditoria-mes"] izaak
+•⁠  ⁠chunks "comp-c", "calibracion-sin-test", "youden", "sistema-congelado", "auditoria-mes"
 
 **Revisión cruzada realizada:**
-- Revisé el código de: [PENDIENTE]
-- Comentarios/correcciones aportadas: [PENDIENTE]
+•⁠  ⁠Revisé el código de: Alex Astudillo
+•⁠  ⁠Comentarios/correcciones aportadas: Investigación de fuente, licencia y DOI del dataset
 
+•⁠  ⁠Revisé el código de: Martina Bedwell
+•⁠  ⁠Comentarios/correcciones aportadas: Baseline y regresión logística
+
+•⁠  ⁠Revisé el código de: Valentina Quiroz
+•⁠  ⁠Comentarios/correcciones aportadas: Ajuste de grillas de hiperparámetros (k, C, sigma) y paralelización
+
+•⁠  ⁠Revisé el código de: Izaak Ulloa
+•⁠  ⁠Comentarios/correcciones aportadas: Árbol de clasificación, Random Forest y Gradient Boosting
 ---
 
 ## Declaración firmada
@@ -100,10 +131,10 @@ Declaramos que la información presentada en este documento refleja fielmente la
 
 | Integrante | Firma / confirmación |
 |---|---|
-| Alex Astudillo | [PENDIENTE] |
-| Martina Bedwell | [PENDIENTE] |
-| Sebastián Quintolén | [PENDIENTE] |
-| Valentina Quiroz | [PENDIENTE] |
-| Izaak Ulloa | [PENDIENTE] |
+| Alex Astudillo | **CONFIRMO** |
+| Martina Bedwell | **CONFIRMO** |
+| Sebastián Quintolén | **CONFIRMO** |
+| Valentina Quiroz | **CONFIRMO** |
+| Izaak Ulloa | **CONFIRMO** |
 
-*Fecha: [PENDIENTE]*
+*Fecha: 09-08-2026*
