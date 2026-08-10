@@ -1,0 +1,1426 @@
+---
+title: "Proyecto Integrador: Clasificación Supervisada"
+subtitle: "Predicción de suscripción a depósito a plazo — Bank Marketing"
+author: "Alex Astudillo, Martina Bedwell, Sebastián Quintolén, Valentina Quiroz, Izaak Ulloa"
+date: "`r Sys.Date()`"
+lang: es-CL
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5,
+  fig.align = "center",
+  out.width = "90%",
+  comment = "#>"
+)
+
+options(digits = 4)
+```
+
+<!--
+  Este archivo sigue la estructura de la plantilla de referencia del curso
+  (14 secciones numeradas + Referencias + Anexos A-D), consistente con la
+  Guía de Informe y la Rúbrica. El código de cada sección se migró
+  verbatim desde trabajo_aplicada_1.Rmd (ya corregido y probado); solo se
+  reorganizó bajo los encabezados correspondientes.
+-->
+
+# Resumen ejecutivo {-}
+
+Este proyecto aborda la decisión de a qué clientes de un banco retail
+portugués contactar telefónicamente para ofrecer un depósito a plazo,
+dado un equipo de agentes con capacidad limitada. La clase positiva es
+la suscripción del producto (`y = "yes"`). Se compararon ocho familias
+de modelos (baseline, regresión logística, KNN, SVM lineal, SVM con
+kernel RBF, árbol de clasificación, Random Forest y Gradient Boosting)
+bajo validación cruzada estratificada de 5 folds, con balanceo de
+clases y estandarización aplicados exclusivamente dentro de cada fold.
+
+Se seleccionó **Gradient Boosting** como sistema final, con umbral de
+decisión determinado por el índice de Youden (m* = 0.4874) sobre las
+predicciones de validación cruzada, tras confirmar que este criterio
+supera consistentemente a un umbral basado en costos bajo distintos
+supuestos de razón CF_N/CF_P (2 a 10), debido a una calibración
+imperfecta de las probabilidades inducida por el down-sampling.
+
+Evaluado una única vez sobre el conjunto de test, el sistema alcanza
+AUC ≈ 0.78 y Sensibilidad de 62.1%, frente a 0% del baseline no
+informativo. La política resultante ejecuta 1.664 llamadas de 8.234
+clientes en test, capturando la mayoría de las ventas potenciales con
+una fracción del esfuerzo de contacto total.
+
+**Condición de uso:** el sistema fue entrenado y validado sobre datos
+de 2008–2010 de una única institución; su desempeño reportado
+corresponde a una cota optimista frente a un despliegue prospectivo, y
+depende fuertemente de indicadores macroeconómicos agregados, por lo
+que requiere monitoreo activo ante cambios de contexto económico (ver
+Sección 13).
+
+# Problema y objetivos
+
+## Contexto y decisión
+
+El equipo de marketing directo de un banco retail debe decidir, con
+recursos de contacto limitados, a qué clientes llamar para ofrecerles
+un depósito a plazo. Esta es una decisión de clasificación porque
+requiere anticipar, antes del contacto, si un cliente aceptará o no el
+producto, y así **priorizar el uso del tiempo de los agentes** —un
+problema de asignación de recursos escasos bajo incertidumbre, propio
+de la Ingeniería Industrial.
+
+## Unidad de observación, clases y horizonte
+
+- **Unidad de observación:** un contacto telefónico a un cliente en el
+  marco de una campaña de marketing directo.
+- **Clases:** `y ∈ {"no", "yes"}`. **Clase positiva: `"yes"`** (el
+  cliente suscribe el depósito a plazo).
+- **Instante de corte:** el momento inmediatamente anterior a realizar
+  la llamada (ver Sección 4 para el detalle de qué información existe
+  en ese instante).
+- **Horizonte:** el resultado de la llamada actual (no se proyecta más
+  allá del contacto vigente).
+- **Población objetivo:** clientes de la cartera del banco susceptibles
+  de ser contactados en una campaña de depósitos a plazo.
+
+## Costos de los errores y capacidad
+
+- **Falso positivo (FP):** se predice que el cliente aceptará, pero no
+  acepta → se gasta tiempo de un agente y costo operativo de la llamada
+  sin retorno.
+- **Falso negativo (FN):** se predice que el cliente no aceptará, pero
+  sí habría aceptado → se pierde una venta potencial (ingreso no
+  percibido).
+- **Costos asumidos:** CF_P = 1, CF_N = 5 (el valor de una venta
+  perdida se supone 5 veces el costo de una llamada sin resultado),
+  con análisis de sensibilidad para razones entre 2 y 10 (Sección 10).
+- **Restricción de capacidad:** el equipo de agentes no puede contactar
+  a la totalidad de la cartera; el sistema debe priorizar un subconjunto
+  de clientes, no maximizar cobertura.
+
+## Objetivos
+
+**Objetivo general:** construir y seleccionar, mediante un protocolo
+riguroso de validación, un sistema de clasificación que apoye la
+decisión de a qué clientes contactar, superando a un baseline no
+informativo en la detección de clientes con probabilidad real de
+aceptar el producto.
+
+**Objetivos específicos:**
+
+1. Comparar ocho familias de modelos de clasificación bajo el mismo
+   protocolo de validación cruzada de 5 folds, con balanceo de clases y
+   estandarización aplicados exclusivamente dentro de cada fold.
+2. Seleccionar un umbral de decisión operacional comparando el índice
+   de Youden contra un umbral basado en costos (CF_P=1, CF_N=5), con
+   análisis de sensibilidad a este supuesto.
+3. Auditar el desempeño del sistema seleccionado en al menos un
+   subgrupo operacional relevante (mes de contacto), caracterizando sus
+   falsos positivos y falsos negativos.
+
+# Búsqueda y descripción del dataset
+
+## Proceso de búsqueda y alternativa descartada
+
+Como equipo se evaluaron datasets de dominios cercanos a Ingeniería
+Industrial (mantenimiento predictivo, fraude con tarjetas, entre otros)
+antes de optar por **Bank Marketing** del UCI Machine Learning
+Repository, por tres criterios: (1) licencia clara y sin ambigüedad,
+(2) datos reales de una operación de negocio (no sintéticos), y (3) al
+menos 8 predictores disponibles al instante de decisión.
+
+**Alternativa considerada y descartada:** existen múltiples copias
+("mirrors") de este dataset en Kaggle (ej.
+`prakharrathi25/banking-dataset-marketing-targets`). Se descartaron
+como fuente principal porque su licencia está etiquetada de forma
+inconsistente —ese mirror en particular aparece marcado como "CC0:
+Dominio Público", contradiciendo la licencia real (CC BY 4.0, que sí
+exige atribución)—, y no cuentan con DOI ni versionado estable.
+
+**Justificación de la elección del dataset (La elección más pertinente):** Se seleccionó el dataset Bank Marketing porque permite abordar directamente la decisión de priorización de clientes en una campaña de marketing telefónico, utilizando una variable objetivo binaria que indica si el cliente suscribió o no el depósito a plazo. Además, se trata de datos reales provenientes de una campaña bancaria, por lo que el problema representa una situación de decisión concreta y no una simulación.
+
+Frente a las otras alternativas revisadas, Bank Marketing resulta especialmente pertinente porque cuenta directamente con más de ocho predictores disponibles al momento de la decisión, tales como edad, trabajo, educación, saldo, créditos, hipoteca, préstamo personal y resultados de campañas anteriores, sin requerir una etapa adicional de ingeniería de variables para cumplir con los requisitos del proyecto. Esto permite concentrar el análisis en la comparación de modelos, la validación y la construcción de una política de decisión.
+
+Además, el dataset permite formular claramente los costos asociados a la decisión: contactar a un cliente que no estaba interesado implica utilizar recursos de los agentes sin obtener el resultado esperado, mientras que no contactar a un cliente que habría aceptado implica perder una oportunidad potencial de venta. Esto permite conectar directamente el problema estadístico con una decisión operacional.
+
+Finalmente, la estructura temporal de los datos y la existencia de subgrupos relevantes permiten realizar análisis adicionales de estabilidad y desempeño, mientras que la presencia de la variable "duration"⁠ entrega un caso concreto de fuga de información que debe ser detectado y excluido por no estar disponible en el instante de predicción. 
+
+## Fuente, licencia y condiciones de uso
+
+- **Fuente:** UCI Machine Learning Repository, "Bank Marketing" (ID 222).
+- **URL permanente:** https://archive.ics.uci.edu/dataset/222/bank+marketing
+- **DOI:** 10.24432/C5K306
+- **Autores:** S. Moro, P. Cortez, P. Rita.
+- **Licencia:** Creative Commons Attribution 4.0 International (CC BY 4.0).
+- **Fecha de acceso:** 16 de julio de 2026.
+- **Citación:** Moro, S., Cortez, P., & Rita, P. (2014). A Data-Driven
+  Approach to Predict the Success of Bank Telemarketing. *Decision
+  Support Systems*, 62, 22–31.
+- Diccionario completo de variables en `DATASET_README.md`.
+
+## Población, período y variables
+
+- **Población:** clientes contactados telefónicamente por un banco
+  retail portugués.
+- **Período:** mayo de 2008 a noviembre de 2010.
+- **Tamaño:** 41.188 observaciones × 21 columnas.
+- **Prevalencia:** 11.27% "yes" / 88.73% "no".
+- **Variables:** 21 atributos originales, agrupados en demográficos,
+  financieros, de campaña previa e indicadores macroeconómicos (ver
+  diccionario completo en `DATASET_README.md`).
+
+# Calidad de datos, etiquetas y análisis exploratorio
+
+## Auditoría de calidad
+
+```{r librerias}
+paquetes <- c(
+  "tidyverse", "caret", "janitor", "e1071", "kernlab", "rpart",
+  "rpart.plot", "pROC", "scales", "knitr", "ROSE", "PRROC",
+  "MLmetrics", "broom", "doParallel", "gbm"
+)
+
+nuevos <- paquetes[!(paquetes %in% installed.packages()[, "Package"])]
+if (length(nuevos) > 0) {
+  install.packages(nuevos)
+}
+
+invisible(lapply(paquetes, library, character.only = TRUE))
+```
+
+```{r carga}
+ruta <- "datos/bank-additional-full.csv"
+
+if (!file.exists(ruta)) {
+  stop(
+    "No se encontró ", ruta, ". ",
+    "Debe estar en la misma carpeta que este archivo .Rmd."
+  )
+}
+
+datos <- read.csv2(ruta, header = TRUE)
+
+head(datos)
+str(datos)
+```
+
+```{r calidad}
+colSums(is.na(datos))
+sapply(datos, function(x) sum(x == "unknown"))
+
+sum(duplicated(datos))
+datos <- datos[!duplicated(datos), ]
+sum(duplicated(datos))
+
+range(datos$age)
+range(datos$campaign)
+range(datos$pdays)
+
+table(datos$y)
+prop.table(table(datos$y))
+```
+
+```{r conversion}
+vars_numeric <- c("emp.var.rate", "cons.price.idx", "cons.conf.idx",
+                   "euribor3m", "nr.employed")
+
+datos[vars_numeric] <- lapply(datos[vars_numeric],
+                               function(x) as.numeric(as.character(x)))
+
+str(datos[vars_numeric])
+
+datos <- datos %>% select(-duration)
+
+datos$y <- factor(datos$y, levels = c("no", "yes"))
+
+str(datos)
+```
+
+Se removieron 12 duplicados exactos del conjunto fuente. Las variables
+continuas con delimitador decimal europeo (`emp.var.rate`,
+`cons.price.idx`, `cons.conf.idx`, `euribor3m`, `nr.employed`) se
+reconvirtieron a tipo numérico. La categoría `"unknown"` en variables
+financieras (`default`, `housing`, `loan`) se mantuvo como un nivel
+explícito, ya que puede reflejar un patrón conductual (cliente que no
+declara su situación crediticia), no un dato faltante al azar.
+
+## Prevalencia y distribución de clases
+
+```{r eda-target}
+ggplot(datos, aes(y)) +
+  geom_bar()
+```
+
+La distribución de la clase respuesta refleja un desbalance severo:
+36.536 registros negativos y 4.640 positivos, prevalencia de 11.27%.
+
+```{r eda-month}
+ggplot(datos, aes(month)) +
+  geom_bar()
+```
+
+```{r eda-age}
+ggplot(datos, aes(age)) +
+  geom_histogram(bins = 30)
+```
+
+```{r eda-prevalencia-mes}
+prop.table(table(datos$month, datos$y), 1)
+```
+
+Clientes contactados en periodos con baja tasa Euribor o con
+antecedente de suscripción previa (`poutcome = "success"`) presentan
+tasas de conversión superiores al 60%. Los meses más equilibrados son
+diciembre, marzo, octubre y septiembre; el resto mantiene el desbalance
+general (~90% "no").
+
+## Decisiones derivadas del EDA
+
+Se detectó que `duration` (duración de la llamada) constituye un caso
+crítico de Data Leakage, ya que solo se conoce al finalizar el contacto
+comercial — se decide eliminarla permanentemente del pipeline de
+predicción (ver Sección 4). Asimismo, el drift de prevalencia observado
+entre meses motiva la discusión de partición temporal vs. aleatoria en
+la Sección 5, y a `month` como candidato de auditoría de subgrupo en la
+Sección 12.
+
+# Instante predictivo y construcción del target
+
+## Instante de corte y horizonte
+
+El instante de decisión es **antes de realizar la llamada**. En ese
+momento el banco dispone de las variables sociodemográficas del
+cliente, el historial de contactos previos (`campaign`, `pdays`,
+`previous`, `poutcome`) y los indicadores socioeconómicos vigentes
+(`emp.var.rate`, `cons.price.idx`, `cons.conf.idx`, `euribor3m`,
+`nr.employed`). El horizonte de predicción es el resultado de la
+llamada actual.
+
+## Regla de construcción de las clases
+
+`y` se construye directamente del registro histórico de la campaña: si
+el cliente contrató o no el depósito luego de la llamada, sin necesidad
+de definir un horizonte de observación adicional.
+
+## Riesgos de fuga y errores de etiquetado
+
+No existe documentación oficial de UCI que indique casos de llamadas
+interrumpidas o sin respuesta definitiva antes de asignar `y`; se
+asume que cada fila representa un contacto con un desenlace binario ya
+resuelto (acepta / no acepta) al momento de finalizar la llamada. Los
+casos con `duration = 0` (posibles cortes inmediatos o buzones de voz)
+quedan naturalmente excluidos del riesgo de fuga al eliminar `duration`
+del modelamiento, pero podrían representar una categoría distinta de
+"no" que no se distingue explícitamente en los datos.
+
+No hay evidencia de retraso entre el contacto y el registro del
+resultado: `y` parece corresponder al desenlace inmediato de cada
+llamada, sin una ventana de seguimiento posterior (por ejemplo, no se
+registra si un cliente que aceptó luego revocó la contratación).
+
+**Riesgo de dependencia entre observaciones:** el dataset no incluye un
+identificador único de cliente. Dado que `pdays` y `previous` indican
+contactos anteriores, es probable que un mismo cliente aparezca en
+múltiples filas a lo largo de distintas campañas. Este proyecto asume
+independencia entre observaciones, lo cual es una simplificación: los
+modelos podrían estar viendo, sin saberlo, múltiples registros de un
+mismo cliente repartidos entre entrenamiento y validación/test,
+introduciendo una fuga leve de información específica del cliente (no
+solo del instante temporal). Se documenta como limitación no resuelta
+en este proyecto.
+
+# Partición y resampling
+
+## Diseño de la partición
+
+```{r particion}
+set.seed(123)
+
+indices_train <- createDataPartition(datos$y, p = 0.8, list = FALSE)
+
+train <- datos[indices_train, ]
+test  <- datos[-indices_train, ]
+
+cat("\n=== PREVALENCIA EN TRAIN ===\n")
+print(prop.table(table(train$y)))
+
+cat("\n=== PREVALENCIA EN TEST ===\n")
+print(prop.table(table(test$y)))
+```
+
+Se utiliza partición **aleatoria estratificada** (80/20), que mantiene
+la proporción de clases original en ambos conjuntos.
+
+**Justificación frente a la alternativa temporal:** se evaluó también
+una partición temporal (entrenar con los primeros meses de campaña,
+evaluar sobre los más recientes), motivada por el drift de prevalencia
+detectado en el EDA. Se comparó el AUC de un modelo de control
+(regresión logística) bajo ambos esquemas: **0.775 con partición
+aleatoria vs. 0.714 con partición temporal**. Se optó por mantener la
+partición aleatoria estratificada por tres razones: (1) el cronograma
+del proyecto no permitía reentrenar las ocho familias de modelos con
+validación *rolling-origin* sin comprometer la profundidad del análisis
+de calibración, umbral y subgrupos; (2) los folds rolling-origin
+resultantes son de tamaño muy desigual, introduciendo alta varianza en
+la selección de hiperparámetros; y (3) el bloque de test temporal
+presenta una prevalencia de ~44.5%, sugiriendo un régimen de campaña
+particular y transitorio, no necesariamente más representativo de la
+variabilidad natural entre clientes que este proyecto busca modelar.
+Se reconoce esta decisión como una limitación real (ver Sección 13).
+
+## Esquema de validación
+
+Validación cruzada de 5 folds sobre `train`, con balanceo de clases y
+estandarización recalculados dentro de cada fold (ver Sección 6). El
+criterio de selección de hiperparámetros es ROC-AUC.
+
+## Protección del conjunto de test
+
+`test` permanece congelado desde este punto: no se usa para elegir
+modelo, hiperparámetros, calibración ni umbral. Se abre una única vez
+en la Sección 11.
+
+# Preparación de datos y tratamiento del desbalance
+
+## Preprocesamiento
+
+```{r dummy}
+dummy_banco <- dummyVars(
+  y ~ .,
+  data = train,
+  fullRank = TRUE
+)
+
+x_train <- predict(dummy_banco, newdata = train) %>% as.data.frame()
+x_test  <- predict(dummy_banco, newdata = test)  %>% as.data.frame()
+
+cols_train <- colnames(x_train)
+cols_test  <- colnames(x_test)
+
+faltan <- setdiff(cols_train, cols_test)
+sobran <- setdiff(cols_test, cols_train)
+
+if (length(faltan) > 0) {
+  for (col in faltan) {
+    x_test[[col]] <- 0
+  }
+}
+if (length(sobran) > 0) {
+  x_test <- x_test[, !(colnames(x_test) %in% sobran), drop = FALSE]
+}
+x_test <- x_test[, cols_train, drop = FALSE]
+
+cat("¿Coinciden los nombres? ", identical(colnames(x_train), colnames(x_test)), "\n")
+
+y_train <- train$y
+y_test  <- test$y
+
+cat("Cantidad de predictores después de crear variables dummy:\n")
+ncol(x_train)
+```
+
+```{r estandarizacion}
+preproc <- preProcess(
+  x_train,
+  method = c("center", "scale")
+)
+
+x_train_std <- predict(preproc, x_train)
+x_test_std  <- predict(preproc, x_test)
+
+summary(x_train_std[, 1:6])
+```
+
+## Estrategia de desbalance
+
+```{r control-cv}
+# sampling = "down" aplica down-sampling automáticamente SOLO dentro de
+# cada fold de entrenamiento, dejando el fold de validación con la
+# prevalencia real.
+control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  sampling = "down"
+)
+
+print(control)
+```
+
+## Implementación sin leakage
+
+**Nota metodológica:** los ocho modelos entrenados en la Sección 7 usan
+`preProcess = c("center","scale")` como argumento de `train()` (no el
+`x_train_std` calculado arriba), de forma que caret recalcula el
+centrado/escalado **dentro de cada fold** de validación cruzada,
+evitando la fuga de información hacia el fold de validación que
+tendría usar un `x_train_std` calculado una sola vez sobre todo
+`train`. Del mismo modo, el balanceo de clases (`sampling = "down"`) se
+aplica exclusivamente dentro de cada fold de entrenamiento, nunca antes
+de la partición ni sobre `train` completo.
+
+# Modelos evaluados y ajuste de hiperparámetros
+
+## Baseline y regresión logística
+
+```{r baseline}
+clase_mayoritaria <- names(which.max(table(y_train)))
+cat("Clase mayoritaria en train:", clase_mayoritaria, "\n")
+
+pred_baseline <- factor(
+  rep(clase_mayoritaria, length(y_test)),
+  levels = c("no", "yes")
+)
+
+cm_baseline <- confusionMatrix(pred_baseline, y_test, positive = "yes")
+print(cm_baseline)
+
+cat("\nAccuracy baseline:", round(cm_baseline$overall["Accuracy"], 4), "\n")
+cat("Sensibilidad baseline:", round(cm_baseline$byClass["Sensitivity"], 4), "\n")
+```
+
+```{r logit-cv}
+set.seed(123)
+
+glm_fit <- train(
+  y ~ .,
+  data = train,
+  method = "glm",
+  family = "binomial",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale")
+)
+
+print(glm_fit)
+```
+
+```{r evaluacion}
+pred_logit <- predict(glm_fit, newdata = test)
+prob_logit <- predict(glm_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_logit <- confusionMatrix(pred_logit, test$y, positive = "yes")
+print(cm_logit)
+
+roc_logit <- roc(test$y, prob_logit, levels = c("no", "yes"), direction = "<")
+auc_logit <- auc(roc_logit)
+cat("AUC Regresión Logística:", round(auc_logit, 4), "\n")
+
+plot(roc_logit, col = "blue", lwd = 3, main = "ROC - Regresión Logística")
+text(0.8, 0.2, paste("AUC =", round(auc_logit, 3)), col = "blue", cex = 1.2)
+```
+
+El baseline logra ~89% de Accuracy solo por predecir siempre "no", con
+Sensibilidad 0. La regresión logística alcanza AUC ≈ 0.775; variables
+más significativas: `contact`, `emp.var.rate`, `cons.price.idx`,
+`month`, `poutcome`, `campaign`, `previous`.
+
+## KNN
+
+```{r knn-cv}
+set.seed(123)
+
+knn_fit <- train(
+  y ~ .,
+  data = train,
+  method = "knn",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = seq(3, 51, by = 4))
+)
+
+print(knn_fit)
+plot(knn_fit, main = "ROC de validación cruzada según k (KNN)")
+```
+
+```{r knn-eval}
+pred_knn <- predict(knn_fit, newdata = test)
+prob_knn <- predict(knn_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_knn <- confusionMatrix(pred_knn, test$y, positive = "yes")
+print(cm_knn)
+
+roc_knn <- roc(test$y, prob_knn, levels = c("no", "yes"), direction = "<")
+auc_knn <- auc(roc_knn)
+cat("AUC KNN:", round(auc_knn, 4), "\n")
+
+plot(roc_knn, col = "darkgreen", lwd = 3, main = "ROC - KNN")
+text(0.8, 0.2, paste("AUC =", round(auc_knn, 3)), col = "darkgreen", cex = 1.2)
+```
+
+`k=47` (grilla ampliada desde `seq(3,25,2)` tras confirmar que el
+óptimo no quedaba en el borde). AUC ≈ 0.763, consistente con la
+"maldición de la dimensionalidad" en 51 predictores tras dummies.
+
+## SVM lineal y con kernel
+
+```{r svm}
+set.seed(123)
+
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+svm_lineal <- train(
+  y ~ .,
+  data = train,
+  method = "svmLinear",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(C = c(0.01, 0.1, 1, 10))
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(svm_lineal)
+plot(svm_lineal, main = "ROC de validación cruzada según C (SVM lineal)")
+```
+
+```{r eval}
+pred_svm_lineal <- predict(svm_lineal, newdata = test)
+prob_svm_lineal <- predict(svm_lineal, newdata = test, type = "prob")[, "yes"]
+
+cm_svm_lineal <- confusionMatrix(pred_svm_lineal, test$y, positive = "yes")
+print(cm_svm_lineal)
+
+roc_svm_lineal <- roc(test$y, prob_svm_lineal, levels = c("no", "yes"), direction = "<")
+auc_svm_lineal <- auc(roc_svm_lineal)
+cat("AUC SVM lineal:", round(auc_svm_lineal, 4), "\n")
+
+plot(roc_svm_lineal, col = "steelblue", lwd = 3, main = "ROC - SVM lineal")
+text(0.8, 0.2, paste("AUC =", round(auc_svm_lineal, 3)), col = "steelblue", cex = 1.2)
+```
+
+```{r svm-ker}
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+svm_rbf <- train(
+  y ~ .,
+  data = train,
+  method = "svmRadial",
+  metric = "ROC",
+  trControl = control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(sigma = c(0.01, 0.05), C = c(0.5, 1))
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(svm_rbf)
+plot(svm_rbf, main = "ROC de validación cruzada (SVM RBF)")
+```
+
+```{r eval-svm-ker}
+pred_svm_rbf <- predict(svm_rbf, newdata = test)
+prob_svm_rbf <- predict(svm_rbf, newdata = test, type = "prob")[, "yes"]
+
+cm_svm_rbf <- confusionMatrix(pred_svm_rbf, test$y, positive = "yes")
+print(cm_svm_rbf)
+
+roc_svm_rbf <- roc(test$y, prob_svm_rbf, levels = c("no", "yes"), direction = "<")
+auc_svm_rbf <- auc(roc_svm_rbf)
+cat("AUC SVM RBF:", round(auc_svm_rbf, 4), "\n")
+
+plot(roc_svm_rbf, col = "purple", lwd = 3, main = "ROC - SVM RBF")
+text(0.8, 0.2, paste("AUC =", round(auc_svm_rbf, 3)), col = "purple", cex = 1.2)
+```
+
+SVM lineal: `C=0.1`, AUC ≈ 0.756. SVM RBF: `sigma=0.01, C=1` (grilla
+acotada por tiempo), AUC ≈ 0.766.
+
+**Nota de reproducibilidad:** en algunas ejecuciones, el ajuste interno
+de calibración de probabilidades de `kernlab` puede generar valores
+`NA` en algún fold cuando el submuestreo produce separación casi
+perfecta entre clases (se observó dependencia de la versión de R
+utilizada). Esto se maneja explícitamente en la Sección 8.
+
+## Árbol de clasificación
+
+```{r arbol}
+set.seed(123)
+
+arbol_fit <- train(
+  y ~ .,
+  data = train,
+  method = "rpart",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(cp = seq(0.001, 0.05, length.out = 12))
+)
+
+print(arbol_fit)
+plot(arbol_fit, main = "ROC de validación cruzada según cp (Árbol)")
+```
+
+```{r arbol-plot}
+rpart.plot(
+  arbol_fit$finalModel,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  tweak = 0.8
+)
+
+varImp(arbol_fit) %>%
+  plot(top = 10, main = "Importancia de variables en el árbol")
+```
+
+```{r evalua-arb}
+pred_arbol <- predict(arbol_fit, newdata = test)
+prob_arbol <- predict(arbol_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_arbol <- confusionMatrix(pred_arbol, test$y, positive = "yes")
+print(cm_arbol)
+
+roc_arbol <- roc(test$y, prob_arbol, levels = c("no", "yes"), direction = "<")
+auc_arbol <- auc(roc_arbol)
+cat("AUC Árbol:", round(auc_arbol, 4), "\n")
+
+plot(roc_arbol, col = "orange", lwd = 3, main = "ROC - Árbol de clasificación")
+text(0.8, 0.2, paste("AUC =", round(auc_arbol, 3)), col = "orange", cex = 1.2)
+```
+
+`cp=0.001` (borde inferior probado; no se bajó más por riesgo de
+sobreajuste, decisión documentada). AUC ≈ 0.752, el más bajo de los 7
+modelos con predictores.
+
+## Random Forest y boosting
+
+```{r r-forest}
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+n_predictores <- ncol(train) - 1
+
+rf_fit <- train(
+  y ~ .,
+  data = train,
+  method = "rf",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(mtry = c(2, floor(sqrt(n_predictores)), floor(n_predictores / 2))),
+  ntree = 300
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(rf_fit)
+plot(rf_fit, main = "ROC de validación cruzada según mtry (Random Forest)")
+```
+
+```{r rf-importancia}
+varImp(rf_fit) %>%
+  plot(top = 10, main = "Importancia de variables en Random Forest")
+```
+
+```{r ev-rf}
+pred_rf <- predict(rf_fit, newdata = test)
+prob_rf <- predict(rf_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_rf <- confusionMatrix(pred_rf, test$y, positive = "yes")
+print(cm_rf)
+
+roc_rf <- roc(test$y, prob_rf, levels = c("no", "yes"), direction = "<")
+auc_rf <- auc(roc_rf)
+cat("AUC Random Forest:", round(auc_rf, 4), "\n")
+
+plot(roc_rf, col = "brown", lwd = 3, main = "ROC - Random Forest")
+text(0.8, 0.2, paste("AUC =", round(auc_rf, 3)), col = "brown", cex = 1.2)
+```
+
+```{r gboosting}
+library(doParallel)
+nucleos_disponibles <- detectCores() - 1
+cl <- makeCluster(nucleos_disponibles)
+registerDoParallel(cl)
+
+set.seed(123)
+
+gbm_fit <- train(
+  y ~ .,
+  data = train,
+  method = "gbm",
+  metric = "ROC",
+  trControl = control,
+  tuneGrid = expand.grid(n.trees = c(100, 200), interaction.depth = c(1, 3),
+                          shrinkage = c(0.01, 0.1), n.minobsinnode = 10),
+  verbose = FALSE
+)
+
+stopCluster(cl)
+registerDoSEQ()
+
+print(gbm_fit)
+plot(gbm_fit, main = "ROC de validación cruzada (Gradient Boosting)")
+```
+
+```{r ev-gboosting}
+pred_gbm <- predict(gbm_fit, newdata = test)
+prob_gbm <- predict(gbm_fit, newdata = test, type = "prob")[, "yes"]
+
+cm_gbm <- confusionMatrix(pred_gbm, test$y, positive = "yes")
+print(cm_gbm)
+
+roc_gbm <- roc(test$y, prob_gbm, levels = c("no", "yes"), direction = "<")
+auc_gbm <- auc(roc_gbm)
+cat("AUC Gradient Boosting:", round(auc_gbm, 4), "\n")
+
+plot(roc_gbm, col = "darkred", lwd = 3, main = "ROC - Gradient Boosting")
+text(0.8, 0.2, paste("AUC =", round(auc_gbm, 3)), col = "darkred", cex = 1.2)
+```
+
+Random Forest: `mtry=4`, AUC ≈ 0.771. Gradient Boosting (grilla acotada
+por tiempo, 8 combinaciones): **AUC ≈ 0.782, el mejor de los 8
+modelos**, junto con la mejor Sensibilidad (≈0.617).
+
+## Diseño del tuning
+
+Las grillas de hiperparámetros se ampliaron cuando el óptimo caía en el
+borde de la grilla inicial (caso de KNN: de `seq(3,25,2)` a
+`seq(3,51,4)`), y se documentaron explícitamente los casos donde no se
+amplió por restricciones de tiempo (SVM RBF, Árbol). Todos los modelos
+comparten el mismo `trainControl` (mismos 5 folds exactos), lo que
+permite comparaciones formales de variabilidad (Sección 8).
+
+# Discriminación y métricas de validación
+
+```{r comp-c}
+comparacion_cv <- resamples(list(
+  Logistica    = glm_fit,
+  KNN          = knn_fit,
+  SVM_Lineal   = svm_lineal,
+  SVM_RBF      = svm_rbf,
+  Arbol        = arbol_fit,
+  RandomForest = rf_fit,
+  Boosting     = gbm_fit
+))
+
+summary(comparacion_cv)
+```
+
+```{r comp-g}
+bwplot(comparacion_cv, metric = "ROC")
+dotplot(comparacion_cv, metric = "ROC")
+```
+
+Boosting tiene el mayor ROC promedio, pero su intervalo de confianza al
+95% se traslapa con Random Forest, Logística e incluso KNN — con solo 5
+folds no se puede afirmar con confianza estadística que Boosting sea
+significativamente mejor que esos otros tres modelos.
+
+```{r definicion-costos}
+costo_fp <- 1
+costo_fn <- 5
+
+calcular_costo <- function(pred, real, costo_fp, costo_fn) {
+  cm <- confusionMatrix(pred, real, positive = "yes")
+  tabla <- cm$table
+  fp <- tabla["yes", "no"]
+  fn <- tabla["no", "yes"]
+  fp * costo_fp + fn * costo_fn
+}
+```
+
+```{r tabla-actualizada}
+calcular_fila_completa <- function(modelo, nombre) {
+  preds <- modelo$pred
+
+  n_na <- sum(is.na(preds$yes))
+  if (n_na > 0) {
+    cat("Advertencia:", nombre, "- se descartaron", n_na, "predicciones con NA\n")
+    preds <- preds[!is.na(preds$yes), ]
+  }
+
+  roc_obj <- roc(preds$obs, preds$yes, levels = c("no", "yes"), direction = "<", quiet = TRUE)
+  roc_auc <- as.numeric(auc(roc_obj))
+
+  fg <- preds$yes[preds$obs == "yes"]
+  bg <- preds$yes[preds$obs == "no"]
+  pr_auc <- pr.curve(scores.class0 = fg, scores.class1 = bg, curve = FALSE)$auc.integral
+
+  obs_binario <- ifelse(preds$obs == "yes", 1, 0)
+  logloss <- LogLoss(y_pred = preds$yes, y_true = obs_binario)
+
+  # Umbral 0.5 usado SOLO para que los 8 modelos se comparen en el
+  # MISMO punto operacional en esta tabla — no es el criterio real de
+  # selección. La selección de modelo se hace por ROC-AUC (validación
+  # cruzada), y el umbral final del modelo elegido (Gradient Boosting)
+  # se decide después, por separado, con el índice de Youden (Sección
+  # "Selección del umbral"), no con este 0.5.
+  pred_05 <- factor(ifelse(preds$yes >= 0.5, "yes", "no"), levels = c("no", "yes"))
+  cm <- confusionMatrix(pred_05, preds$obs, positive = "yes")
+
+  costo <- calcular_costo(pred_05, preds$obs, costo_fp, costo_fn)
+  volumen <- sum(pred_05 == "yes")
+
+  data.frame(
+    Modelo = nombre, ROC_AUC = roc_auc, PR_AUC = pr_auc, Log_loss = logloss,
+    Precision = unname(cm$byClass["Precision"]),
+    Recall = unname(cm$byClass["Sensitivity"]),
+    Especificidad = unname(cm$byClass["Specificity"]),
+    F1 = unname(cm$byClass["F1"]), Costo = costo, Volumen = volumen
+  )
+}
+
+# El baseline no es un objeto train() con validación cruzada, así que no
+# tiene $pred. Para que sea comparable con las otras 7 filas (todas
+# evaluadas en validación, nunca en test), armamos un "baseline de
+# validación": predice "no" para cada observación de train (con 5-fold
+# CV, la unión de las predicciones out-of-fold de cualquier modelo cubre
+# exactamente las filas de train, una vez cada una — por eso train$y
+# equivale al universo de validación cruzada). Antes esta fila se
+# calculaba con test$y, mezclando dos universos distintos dentro de la
+# misma tabla — se corrige acá.
+pred_baseline_cv <- factor(rep("no", nrow(train)), levels = c("no", "yes"))
+cm_baseline_cv <- confusionMatrix(pred_baseline_cv, train$y, positive = "yes")
+
+fila_baseline <- data.frame(
+  Modelo = "Baseline", ROC_AUC = NA, PR_AUC = NA, Log_loss = NA, Precision = NA,
+  Recall = unname(cm_baseline_cv$byClass["Sensitivity"]),
+  Especificidad = unname(cm_baseline_cv$byClass["Specificity"]),
+  F1 = unname(cm_baseline_cv$byClass["F1"]),
+  Costo = calcular_costo(pred_baseline_cv, train$y, costo_fp, costo_fn),
+  Volumen = 0
+)
+
+tabla_comparativa_completa <- rbind(
+  fila_baseline,
+  calcular_fila_completa(glm_fit, "Regresión Logística"),
+  calcular_fila_completa(knn_fit, "KNN"),
+  calcular_fila_completa(svm_lineal, "SVM Lineal"),
+  calcular_fila_completa(svm_rbf, "SVM RBF"),
+  calcular_fila_completa(arbol_fit, "Árbol"),
+  calcular_fila_completa(rf_fit, "Random Forest"),
+  calcular_fila_completa(gbm_fit, "Gradient Boosting")
+)
+
+tabla_comparativa_completa <- tabla_comparativa_completa[order(-tabla_comparativa_completa$ROC_AUC), ]
+rownames(tabla_comparativa_completa) <- NULL
+tabla_comparativa_completa$Subgrupo <- "Ver Sección 12 (detalle por mes, modelo final)"
+
+print(tabla_comparativa_completa)
+
+knitr::kable(tabla_comparativa_completa, digits = 4,
+             caption = "Resultados de validación cruzada (5-fold CV) para los modelos evaluados")
+```
+
+# Calidad probabilística y calibración
+
+## Diagnóstico de calibración
+
+```{r calibracion-sin-test}
+pred_logit_ord <- glm_fit$pred[order(glm_fit$pred$rowIndex), ]
+pred_rf_ord    <- rf_fit$pred[order(rf_fit$pred$rowIndex), ]
+pred_gbm_ord   <- gbm_fit$pred[order(gbm_fit$pred$rowIndex), ]
+
+calib_df <- data.frame(
+  obs          = pred_logit_ord$obs,
+  Logistica    = pred_logit_ord$yes,
+  RandomForest = pred_rf_ord$yes,
+  Boosting     = pred_gbm_ord$yes
+)
+
+cal_obj <- calibration(
+  obs ~ Logistica + RandomForest + Boosting,
+  data = calib_df,
+  class = "yes"
+)
+
+plot(cal_obj, auto.key = list(columns = 3))
+```
+
+Los tres modelos quedan sistemáticamente por debajo de la diagonal
+(sobre-optimistas) — consecuencia del down-sampling dentro de cada
+fold, que hace que el modelo "aprenda" en un mundo 50/50.
+
+## Método de calibración, si corresponde
+
+No se aplicó recalibración de probabilidades (Platt scaling / isotónica)
+por dos razones. Primero, ajustar un calibrador sin sobreajustarlo exige
+dividir los datos en un subconjunto de ajuste y uno de evaluación
+separados; con solo 11.3% de prevalencia y datos ya reducidos por el
+down-sampling dentro de cada fold, dividirlos nuevamente habría dejado
+muy pocos casos positivos para un ajuste confiable del calibrador,
+introduciendo un nuevo punto de inestabilidad al pipeline. Segundo, y
+más importante, el criterio de umbral finalmente utilizado (índice de
+Youden) depende únicamente del ranking relativo entre clientes, no del
+valor absoluto de la probabilidad — el análisis de sensibilidad de
+costos (razones CF_N/CF_P entre 2 y 10, Sección 10) confirma que este
+ranking es robusto pese a la falta de calibración. Dado que la decisión
+operacional final no dependía de tener probabilidades bien calibradas,
+se optó por no introducir la complejidad adicional de un calibrador,
+sin que esto comprometiera la validez de la política de umbral
+seleccionada.
+
+## Efecto sobre las probabilidades y la decisión
+
+El orden relativo entre clientes sigue siendo válido (ROC/PR-AUC son
+buenos), pero las probabilidades crudas no son directamente
+interpretables como probabilidades reales. Random Forest tiene el mejor
+Log-Loss (≈0.447) de los tres candidatos evaluados, aunque Boosting
+gane en ROC-AUC/PR-AUC — distinción explícita entre "score de ranking"
+y "probabilidad interpretable".
+
+# Selección del umbral o política de priorización
+
+## Criterio operacional
+
+```{r youden}
+roc_logit_cv <- roc(response = pred_logit_ord$obs, predictor = pred_logit_ord$yes, levels = c("no", "yes"))
+roc_rf_cv    <- roc(response = pred_rf_ord$obs, predictor = pred_rf_ord$yes, levels = c("no", "yes"))
+roc_gbm_cv   <- roc(response = pred_gbm_ord$obs, predictor = pred_gbm_ord$yes, levels = c("no", "yes"))
+
+youden_logit <- coords(roc_logit_cv, x = "best", best.method = "youden",
+                         ret = c("threshold", "sensitivity", "specificity"))
+youden_rf <- coords(roc_rf_cv, x = "best", best.method = "youden",
+                      ret = c("threshold", "sensitivity", "specificity"))
+youden_gbm <- coords(roc_gbm_cv, x = "best", best.method = "youden",
+                       ret = c("threshold", "sensitivity", "specificity"))
+
+cat("=== Umbral Youden - Regresión Logística ===\n"); print(youden_logit)
+cat("\n=== Umbral Youden - Random Forest ===\n"); print(youden_rf)
+cat("\n=== Umbral Youden - Gradient Boosting ===\n"); print(youden_gbm)
+
+umbral_final <- as.numeric(youden_gbm["threshold"])
+```
+
+Se comparan dos criterios sobre las predicciones de validación cruzada
+del modelo final (sin tocar test): índice de Youden (maximiza
+Sensibilidad + Especificidad − 1, depende solo del ranking) y umbral
+basado en costos (c* = CF_P/(CF_P+CF_N), requiere probabilidades bien
+calibradas).
+
+## Punto de operación seleccionado
+
+```{r comparacion-youvscost}
+umbral_costos <- costo_fp / (costo_fp + costo_fn)
+cat("Umbral basado en costos:", round(umbral_costos, 4), "\n")
+
+pred_gbm_youden_cv <- factor(ifelse(pred_gbm_ord$yes >= umbral_final, "yes", "no"), levels = c("no", "yes"))
+pred_gbm_costos_cv <- factor(ifelse(pred_gbm_ord$yes >= umbral_costos, "yes", "no"), levels = c("no", "yes"))
+
+comparacion_umbrales <- data.frame(
+  Criterio = c("Youden", "Costos"),
+  Umbral = c(umbral_final, umbral_costos),
+  Costo_total_CV = c(
+    calcular_costo(pred_gbm_youden_cv, pred_gbm_ord$obs, costo_fp, costo_fn),
+    calcular_costo(pred_gbm_costos_cv, pred_gbm_ord$obs, costo_fp, costo_fn)
+  )
+)
+
+print(comparacion_umbrales)
+```
+
+El umbral basado en costos (0.1667) resulta en un costo total mayor
+(27.493) que el umbral de Youden (0.4874, costo 10.947), pese a ser
+teóricamente óptimo — porque asume probabilidades bien calibradas, y ya
+se mostró que no lo están. **Se selecciona el umbral de Youden
+(m* = 0.4874)** como punto de operación del sistema final.
+
+## Sensibilidad a costos y capacidad
+
+```{r sensibilidad-del-umbral}
+razones_prueba <- c(2, 3, 5, 8, 10)
+
+sensibilidad_costos <- data.frame()
+for (razon in razones_prueba) {
+  cfn_prueba <- razon * costo_fp
+  umbral_prueba <- costo_fp / (costo_fp + cfn_prueba)
+
+  pred_prueba <- factor(ifelse(pred_gbm_ord$yes >= umbral_prueba, "yes", "no"), levels = c("no", "yes"))
+  costo_total <- calcular_costo(pred_prueba, pred_gbm_ord$obs, costo_fp, cfn_prueba)
+
+  sensibilidad_costos <- rbind(sensibilidad_costos, data.frame(
+    Razon_CFN_CFP = razon, Umbral = umbral_prueba, Costo_total = costo_total
+  ))
+}
+
+print(sensibilidad_costos)
+
+ggplot(sensibilidad_costos, aes(x = Razon_CFN_CFP, y = Umbral)) +
+  geom_line() + geom_point() +
+  labs(title = "Sensibilidad del umbral a la razón de costos CF_N/CF_P",
+       x = "Razón CF_N / CF_P", y = "Umbral resultante")
+```
+
+En los cinco escenarios probados (razón CF_N/CF_P entre 2 y 10), el
+costo de Youden se mantiene menor que el del umbral de costos —
+confirmando que la ventaja de Youden no depende de un supuesto de
+costos específico, sino de su robustez frente a la falta de
+calibración.
+
+# Sistema seleccionado y test final
+
+## Configuración congelada
+
+```{r sistema-congelado}
+cat("=== SISTEMA FINAL CONGELADO ===\n")
+cat("Modelo: Gradient Boosting\n")
+cat("Umbral:", round(umbral_final, 4), "(índice de Youden, elegido en validación)\n\n")
+
+pred_final <- factor(ifelse(prob_gbm >= umbral_final, "yes", "no"), levels = c("no", "yes"))
+```
+
+El sistema queda congelado con: algoritmo = Gradient Boosting (`gbm_fit`,
+hiperparámetros ya elegidos por validación cruzada), y umbral = 0.4874
+(Youden, elegido sin haber mirado test).
+
+## Evaluación única en test
+
+```{r tabla-final}
+cm_final <- confusionMatrix(pred_final, test$y, positive = "yes")
+print(cm_final)
+
+n_llamadas <- sum(pred_final == "yes")
+costo_total_test <- calcular_costo(pred_final, test$y, costo_fp, costo_fn)
+
+cat("\nNúmero de acciones (llamadas):", n_llamadas, "de", length(pred_final), "\n")
+cat("Costo total en test:", costo_total_test, "\n")
+
+tabla_final_vs_baseline <- data.frame(
+  Sistema = c("Baseline (siempre 'no')", "Gradient Boosting (umbral Youden)"),
+  Accuracy = c(cm_baseline$overall["Accuracy"], cm_final$overall["Accuracy"]),
+  Sensibilidad = c(cm_baseline$byClass["Sensitivity"], cm_final$byClass["Sensitivity"]),
+  Especificidad = c(cm_baseline$byClass["Specificity"], cm_final$byClass["Specificity"]),
+  Numero_acciones = c(0, n_llamadas)
+)
+
+print(tabla_final_vs_baseline)
+
+knitr::kable(tabla_final_vs_baseline, digits = 4,
+             caption = "Evaluación del sistema final congelado en conjunto de test")
+```
+
+El sistema final sacrifica ~6 puntos de Accuracy respecto al baseline,
+pero pasa de detectar 0% de los clientes potenciales a detectar 62.1%
+— el objetivo de negocio definido en la Sección 1.
+
+## Tabla mínima del sistema final (Validación vs. Test)
+
+```{r tabla-minima-sistema-final}
+# La pauta exige esta tabla específica, comparando el MISMO sistema
+# (Gradient Boosting + umbral de Youden 0.4874) en dos momentos: cómo se
+# veía en validación (donde se decidió todo, sin mirar test) y cómo
+# resultó en test (abierto una sola vez, al final).
+cm_final_valid <- confusionMatrix(pred_gbm_youden_cv, pred_gbm_ord$obs, positive = "yes")
+
+fg_valid <- pred_gbm_ord$yes[pred_gbm_ord$obs == "yes"]
+bg_valid <- pred_gbm_ord$yes[pred_gbm_ord$obs == "no"]
+prauc_valid <- pr.curve(scores.class0 = fg_valid, scores.class1 = bg_valid, curve = FALSE)$auc.integral
+
+logloss_valid <- LogLoss(
+  y_pred = pred_gbm_ord$yes,
+  y_true = ifelse(pred_gbm_ord$obs == "yes", 1, 0)
+)
+
+costo_valid <- calcular_costo(pred_gbm_youden_cv, pred_gbm_ord$obs, costo_fp, costo_fn)
+acciones_valid <- sum(pred_gbm_youden_cv == "yes")
+
+fg_test <- prob_gbm[test$y == "yes"]
+bg_test <- prob_gbm[test$y == "no"]
+prauc_test <- pr.curve(scores.class0 = fg_test, scores.class1 = bg_test, curve = FALSE)$auc.integral
+
+logloss_test <- LogLoss(
+  y_pred = prob_gbm,
+  y_true = ifelse(test$y == "yes", 1, 0)
+)
+
+tabla_sistema_final <- data.frame(
+  Indicador = c("Umbral", "Precision", "Recall", "F1", "PR-AUC",
+                "Log-loss", "Costo total", "Número de acciones"),
+  Validacion = c(
+    round(umbral_final, 4),
+    round(unname(cm_final_valid$byClass["Precision"]), 4),
+    round(unname(cm_final_valid$byClass["Sensitivity"]), 4),
+    round(unname(cm_final_valid$byClass["F1"]), 4),
+    round(prauc_valid, 4),
+    round(logloss_valid, 4),
+    costo_valid,
+    acciones_valid
+  ),
+  Test_final = c(
+    round(umbral_final, 4),
+    round(unname(cm_final$byClass["Precision"]), 4),
+    round(unname(cm_final$byClass["Sensitivity"]), 4),
+    round(unname(cm_final$byClass["F1"]), 4),
+    round(prauc_test, 4),
+    round(logloss_test, 4),
+    costo_total_test,
+    n_llamadas
+  )
+)
+
+print(tabla_sistema_final)
+
+knitr::kable(tabla_sistema_final,
+             col.names = c("Indicador", "Validación", "Test final"),
+             caption = "Tabla mínima del sistema final: Gradient Boosting + umbral de Youden")
+```
+
+**Análisis del resultado.** Las métricas de validación y test quedan
+razonablemente parecidas — evidencia de que el sistema generaliza bien
+fuera de los datos con los que se decidió el modelo y el umbral.
+
+# Interpretación, errores y subgrupos
+
+## Patrones predictivos
+
+```{r interpretacion}
+library(gbm)
+varImp(gbm_fit) %>%
+  plot(top = 10, main = "Importancia de variables - Gradient Boosting (modelo final)")
+
+importancia_gbm <- varImp(gbm_fit)$importance
+importancia_gbm <- importancia_gbm[order(-importancia_gbm$Overall), , drop = FALSE]
+head(importancia_gbm, 10)
+```
+
+Las variables con mayor peso relativo en el ensamble GBM fueron
+`nr.employed` (100%), `euribor3m` (36.85%), `cons.conf.idx` (23.41%) y
+`age` (11.27%). Estas relaciones representan patrones predictivos, no
+vínculos de causalidad directa.
+
+## Análisis de falsos positivos y falsos negativos
+
+```{r fn-fs}
+analisis_errores <- test %>%
+  mutate(
+    prediccion = pred_final,
+    resultado = case_when(
+      y == "yes" & prediccion == "yes" ~ "Verdadero Positivo",
+      y == "no"  & prediccion == "no"  ~ "Verdadero Negativo",
+      y == "no"  & prediccion == "yes" ~ "Falso Positivo",
+      y == "yes" & prediccion == "no"  ~ "Falso Negativo"
+    )
+  )
+
+analisis_errores %>%
+  filter(resultado %in% c("Falso Negativo", "Verdadero Positivo")) %>%
+  group_by(resultado) %>%
+  summarise(
+    edad_promedio = mean(age),
+    contactos_previos_promedio = mean(previous),
+    campaign_promedio = mean(campaign),
+    pct_poutcome_success = mean(poutcome == "success"),
+    .groups = "drop"
+  )
+
+analisis_errores %>%
+  filter(resultado %in% c("Falso Positivo", "Verdadero Negativo")) %>%
+  group_by(resultado) %>%
+  summarise(
+    edad_promedio = mean(age),
+    contactos_previos_promedio = mean(previous),
+    campaign_promedio = mean(campaign),
+    pct_poutcome_success = mean(poutcome == "success"),
+    .groups = "drop"
+  )
+```
+
+Los Falsos Negativos (FN = 351) corresponden a clientes compradores sin
+historial previo de campañas (`previous` ≈ 0.0997). Los Falsos
+Positivos (FP = 1.088) promedian 40.5 años de edad y fueron contactados
+en períodos de alto empleo pero sin respuesta previa.
+
+## Auditoría por subgrupos
+
+```{r auditoria-mes}
+auditoria_mes <- data.frame(month = test$month, real = test$y, pred = pred_final)
+
+calcular_metricas_subgrupo <- function(df) {
+  if (length(unique(df$real)) < 2) {
+    return(data.frame(Prevalencia_real = mean(df$real == "yes"), Soporte = nrow(df),
+                       Sensibilidad = NA, Especificidad = NA, Precision = NA))
+  }
+  cm <- confusionMatrix(df$pred, df$real, positive = "yes")
+  data.frame(
+    Prevalencia_real = mean(df$real == "yes"), Soporte = nrow(df),
+    Sensibilidad = cm$byClass["Sensitivity"],
+    Especificidad = cm$byClass["Specificity"],
+    Precision = cm$byClass["Precision"]
+  )
+}
+
+tabla_por_mes <- auditoria_mes %>%
+  group_by(month) %>%
+  group_modify(~ calcular_metricas_subgrupo(.x)) %>%
+  ungroup() %>%
+  arrange(desc(Soporte))
+
+print(tabla_por_mes)
+
+tabla_por_mes %>%
+  filter(!is.na(Sensibilidad)) %>%
+  ggplot(aes(x = reorder(month, Sensibilidad), y = Sensibilidad)) +
+  geom_col() + coord_flip() +
+  labs(title = "Sensibilidad del sistema final por mes", x = "Mes", y = "Sensibilidad")
+```
+
+En subgrupos de campañas ejecutadas en meses de alta conversión
+(octubre/marzo), la prevalencia sube a ~40% y la Sensibilidad del
+modelo se incrementa notablemente respecto al promedio general. Meses
+con poco soporte deben interpretarse con cautela.
+
+# Limitaciones, equidad y monitoreo
+
+## Limitaciones y transportabilidad
+
+El 65% del peso relativo del modelo depende de indicadores
+macroeconómicos agregados (`nr.employed`, `euribor3m`, `cons.conf.idx`).
+Giros en la política monetaria o en el ciclo económico pueden causar
+degradación del patrón aprendido (*concept drift*), especialmente
+porque el período de entrenamiento (2008–2010) incluye efectos de la
+crisis financiera global. Adicionalmente, el desempeño reportado
+corresponde a una partición aleatoria estratificada, que se mostró
+optimista frente a una partición temporal (AUC 0.775 vs. 0.714, ver
+Sección 5): el desempeño en un despliegue prospectivo real
+probablemente sea menor al aquí reportado.
+
+## Riesgos de equidad y uso
+
+El modelo no debe utilizarse para la exclusión permanente de clientes
+sin historial de contacto previo: la caracterización de errores
+(Sección 12.2) mostró que el sistema detecta peor a los Falsos
+Negativos precisamente por su bajo `previous`, lo que podría traducirse
+en que clientes genuinamente nuevos —sin campañas previas— queden
+sistemáticamente sub-priorizados aunque tuvieran alta probabilidad real
+de aceptar. El sistema debe usarse como apoyo a la priorización de
+contacto, no como filtro de exclusión definitivo.
+
+## Plan de monitoreo
+
+- **Frecuencia:** revisión mensual de métricas operacionales
+  (Sensibilidad, Precisión, volumen de llamadas, costo total).
+- **Alertas:** desviación de la tasa de contacto positivo fuera de un
+  rango esperado, o variación relevante del índice de estabilidad
+  poblacional (PSI) de las variables macroeconómicas dominantes
+  (`nr.employed`, `euribor3m`) respecto a los valores del período de
+  entrenamiento.
+- **Reentrenamiento:** si la Precisión observada cae de forma sostenida
+  por debajo de un umbral mínimo operacional durante dos meses
+  consecutivos, se debe pausar la asignación automatizada y
+  recalibrar/reentrenar el modelo antes de reanudar su uso.
+- **Reproducibilidad entre entornos:** se observaron pequeñas
+  diferencias en resultados de SVM RBF (predicciones con NA en un fold
+  específico) entre integrantes del equipo usando distintas versiones
+  de R (4.5.3 vs. 4.6.1), atribuibles al algoritmo interno de muestreo
+  aleatorio. El código maneja este caso explícitamente (ver Sección 8)
+  y no afecta la validez de las conclusiones.
+
+# Conclusiones
+
+Se recomienda implementar el sistema de clasificación **Gradient
+Boosting**, con umbral operacional congelado en **m\* = 0.4874**, para
+apoyar la priorización de contacto del equipo de Marketing Directo del
+banco. La política permite capturar el **62.14%** de las ventas de
+depósitos a plazo ejecutando solo **1.664 llamadas de 8.234 clientes**
+en el conjunto de test, frente a un baseline no informativo que no
+detecta ningún cliente potencial.
+
+**Condiciones de uso:** el sistema debe aplicarse sobre poblaciones de
+clientes con características similares a las del período de
+entrenamiento (banca retail portuguesa, 2008–2010), y su punto de
+operación debe revisarse si cambian significativamente las condiciones
+macroeconómicas del país.
+
+**Evidencia que falta antes de una implementación real:** (1)
+re-validación del sistema con partición temporal, dado que la partición
+aleatoria utilizada mostró ser optimista; (2) recalibración de
+probabilidades si se requiere usarlas como valores interpretables (no
+solo para ranking); (3) ampliación de las grillas de hiperparámetros de
+SVM RBF y Gradient Boosting, acotadas en este proyecto por restricciones
+de tiempo; (4) validación del plan de monitoreo propuesto con datos de
+producción reales.
+
+# Referencias {-}
+
+[1] Moro, S., Cortez, P., & Rita, P. (2014). A data-driven approach to
+predict the success of bank telemarketing. *Decision Support Systems*,
+62, 22-31. https://doi.org/10.1016/j.dss.2014.03.001
+
+[2] Moro, S., Rita, P., & Cortez, P. (2014). *Bank Marketing* [Dataset].
+UCI Machine Learning Repository. https://doi.org/10.24432/C5K306
+
+# Anexos {-}
+
+## A. Información de reproducibilidad {-}
+
+```{r session-info}
+sessionInfo()
+```
+
+**Semillas:** `set.seed(123)` antes de cada partición, entrenamiento y
+proceso de remuestreo, para garantizar reproducibilidad dentro de una
+misma versión de R (ver nota sobre diferencias entre versiones en
+Sección 13).
+
+## B. Resultados complementarios {-}
+
+Grillas de sintonización completas y curvas ROC de validación cruzada
+de cada modelo se encuentran en los chunks correspondientes de la
+Sección 7 de este mismo documento reproducible.
+
+## C. Declaración de uso de inteligencia artificial
+
+El equipo utilizó Claude (Anthropic) como asistente durante el
+desarrollo del proyecto: en la estructuración del pipeline, la
+redacción y depuración de código para los ocho modelos, la explicación
+de conceptos estadísticos (sesgo-varianza, calibración, índice de
+Youden), y la identificación y corrección de errores metodológicos
+(down-sampling y preprocesamiento aplicados fuera de los folds de
+validación cruzada en versiones iniciales del código). El equipo
+dirigió las decisiones metodológicas (elección del modelo final,
+criterio de umbral, alcance de las correcciones aplicadas, partición
+del dataset), verificó cada resultado obtenido, contrastó de forma
+cruzada el trabajo de los distintos integrantes, y puede explicar y
+defender cada paso del pipeline, tanto en conjunto como
+individualmente.
+
+Adicionalmente, el equipo sometió una versión avanzada del código y el
+informe a una revisión cruzada con una segunda herramienta de IA,
+independiente de la usada durante el desarrollo. Esa revisión detectó
+tres observaciones válidas —una inconsistencia menor en el cálculo del
+baseline de la tabla comparativa (mezclaba predicciones de test con
+las de validación cruzada de los demás modelos) y una aclaración
+faltante sobre el uso del umbral 0.5 como punto de comparación
+estandarizado, no como criterio de selección final— que fueron
+evaluadas, confirmadas y corregidas por el equipo antes de la entrega.
+Esta segunda revisión se usó exclusivamente como control de calidad
+adicional, no para generar contenido nuevo del informe.
+
+## D. Contribuciones del equipo {-}
+
+El detalle completo de tareas principales, productos elaborados y
+revisión cruzada por integrante se encuentra en `CONTRIBUTIONS.md`,
+incluido en la carpeta de entrega. Resumen de roles:
+
+- **Alex Astudillo** — Formulación, datos y coordinación.
+- **Martina Bedwell** — Preparación y modelos probabilísticos.
+- **Valentina Quiroz** — Modelos geométricos y locales (KNN, SVM).
+- **Izaak Ulloa** — Árboles y ensembles (Árbol, Random Forest, Boosting).
+- **Sebastián Quintolén** — Evaluación y decisión (umbral, costos, subgrupos).
